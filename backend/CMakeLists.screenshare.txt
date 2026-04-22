@@ -1,0 +1,45 @@
+cmake_minimum_required(VERSION 3.15)
+project(ScreenShareServer VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# 头文件路径
+include_directories(
+    ${CMAKE_SOURCE_DIR}/include
+)
+
+# 屏幕共享服务器源文件
+add_executable(screenshare-server
+    src/screen_share_main.cpp
+    src/webrtc/signaling_server.cpp
+    src/utils/logger.cpp
+)
+
+# 创建一个简化的 WebSocket 服务器
+add_executable(screenshare-test
+    src/test_websocket.cpp
+)
+
+# Windows 链接库
+if(WIN32)
+    target_link_libraries(screenshare-server ws2_32)
+    target_link_libraries(screenshare-test ws2_32)
+endif()
+
+# 设置输出目录
+set_target_properties(screenshare-server PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+set_target_properties(screenshare-test PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+)
+
+message(STATUS "========================================")
+message(STATUS "  Screen Share Server Configuration")
+message(STATUS "========================================")
+message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "Standard: C++${CMAKE_CXX_STANDARD}")
+message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
+message(STATUS "========================================")

@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe /c \"scripts\\\\build-screenshare.bat\")",
+      "Bash(rm -f CMakeLists.txt.backup)",
+      "Bash(cp CMakeLists.txt CMakeLists.txt.backup)",
+      "Bash(cp CMakeLists.screenshare.txt CMakeLists.txt)",
+      "Bash(powershell -Command \"& 'C:\\\\Program Files\\\\CMake\\\\bin\\\\cmake.exe' --build . --config Release\")",
+      "Bash(cp CMakeLists.txt.backup CMakeLists.txt)",
+      "Bash(rm CMakeLists.txt.backup)",
+      "Bash(npm install *)",
+      "Bash(node signaling-server.js)",
+      "Bash(curl -s \"http://localhost:8080/health\")",
+      "Bash(taskkill /F /IM node.exe)",
+      "Bash(netstat -ano)",
+      "Bash(findstr :8081)",
+      "Bash(taskkill /F /PID 15796)",
+      "Bash(powershell -Command \"Stop-Process -Id 15796 -Force\")"
+    ]
+  }
+}

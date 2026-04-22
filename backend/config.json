@@ -1,0 +1,9 @@
+{
+  "http_port": 8080,
+  "websocket_port": 8081,
+  "rtmp_port": 1935,
+  "hls_path": "./hls",
+  "temp_path": "./temp",
+  "log_level": "info",
+  "log_file": "avframework.log"
+}

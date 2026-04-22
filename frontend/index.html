@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AVFramework - 音视频框架</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #0f0f23;
+      color: #ffffff;
+      min-height: 100vh;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      min-height: 100vh;
+    }
+
+    header {
+      background: rgba(20, 20, 40, 0.8);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 1rem 2rem;
+    }
+
+    header h1 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    nav {
+      display: flex;
+      gap: 2rem;
+      margin-top: 1rem;
+    }
+
+    nav button {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.7);
+      cursor: pointer;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+      transition: color 0.3s;
+    }
+
+    nav button:hover,
+    nav button.active {
+      color: #ffffff;
+    }
+
+    nav button.active {
+      border-bottom: 2px solid #667eea;
+    }
+
+    main {
+      flex: 1;
+      padding: 2rem;
+      max-width: 1400px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .section {
+      display: none;
+    }
+
+    .section.active {
+      display: block;
+    }
+
+    .card {
+      background: rgba(30, 30, 50, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .card h2 {
+      margin-bottom: 1rem;
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+
+    .video-container {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .controls {
+      display: flex;
+      gap: 1rem;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .controls input,
+    .controls select,
+    .controls button {
+      padding: 0.75rem 1.5rem;
+      border-radius: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      background: rgba(255, 255, 255, 0.05);
+      color: #ffffff;
+      font-size: 0.875rem;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .controls input:focus,
+    .controls select:focus {
+      outline: none;
+      border-color: #667eea;
+    }
+
+    .controls button:hover {
+      background: rgba(102, 126, 234, 0.2);
+      border-color: #667eea;
+    }
+
+    .controls button.primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+    }
+
+    .controls button.primary:hover {
+      opacity: 0.9;
+    }
+
+    .stream-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+      gap: 1rem;
+    }
+
+    .stream-item {
+      background: rgba(30, 30, 50, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 1rem;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .stream-item:hover {
+      border-color: #667eea;
+      transform: translateY(-2px);
+    }
+
+    .stream-item h3 {
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+    }
+
+    .stream-item p {
+      font-size: 0.875rem;
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .status {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 0.5rem;
+    }
+
+    .status.online {
+      background: #10b981;
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+    }
+
+    .status.offline {
+      background: #ef4444;
+    }
+
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    .loading::after {
+      content: '';
+      width: 40px;
+      height: 40px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: #667eea;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 0.875rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>🎬 AVFramework</h1>
+      <nav>
+        <button data-section="player" class="active">播放器</button>
+        <button data-section="streams">流管理</button>
+        <button data-section="webrtc">实时通信</button>
+        <button data-section="upload">上传视频</button>
+      </nav>
+    </header>
+
+    <main>
+      <section id="player-section" class="section active">
+        <div class="card">
+          <h2>视频播放器</h2>
+          <div class="video-container" id="player-container">
+            <div class="loading"></div>
+          </div>
+          <div class="controls">
+            <input type="text" id="stream-url" placeholder="输入流地址 (HLS/DASH/FLV)">
+            <select id="stream-type">
+              <option value="hls">HLS</option>
+              <option value="dash">DASH</option>
+              <option value="flv">FLV</option>
+            </select>
+            <button class="primary" id="play-btn">播放</button>
+            <button id="stop-btn">停止</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="streams-section" class="section">
+        <div class="card">
+          <h2>流列表</h2>
+          <div class="controls">
+            <button class="primary" id="refresh-streams">刷新列表</button>
+            <button id="create-stream">创建新流</button>
+          </div>
+          <div class="stream-list" id="stream-list">
+            <div class="loading"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="webrtc-section" class="section">
+        <div class="card">
+          <h2>WebRTC 实时通信</h2>
+          <div class="video-container" id="webrtc-local">
+            <video id="local-video" autoplay muted playsinline></video>
+          </div>
+          <div class="video-container" id="webrtc-remote">
+            <video id="remote-video" autoplay playsinline></video>
+          </div>
+          <div class="controls">
+            <button class="primary" id="start-webrtc">开始通话</button>
+            <button id="stop-webrtc">结束通话</button>
+            <button id="toggle-mic">静音麦克风</button>
+            <button id="toggle-camera">关闭摄像头</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="upload-section" class="section">
+        <div class="card">
+          <h2>上传视频</h2>
+          <div class="controls">
+            <input type="file" id="video-file" accept="video/*">
+            <button class="primary" id="upload-btn">上传</button>
+          </div>
+          <div id="upload-progress" style="margin-top: 1rem; display: none;">
+            <div style="background: rgba(255,255,255,0.1); border-radius: 6px; height: 8px; overflow: hidden;">
+              <div id="progress-bar" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); height: 100%; width: 0%; transition: width 0.3s;"></div>
+            </div>
+            <p id="progress-text" style="margin-top: 0.5rem; color: rgba(255,255,255,0.7);">0%</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      AVFramework © 2024 | 简易音视频框架
+    </footer>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

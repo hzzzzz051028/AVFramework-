@@ -1,0 +1,23 @@
+{
+  "name": "avframework-frontend",
+  "version": "1.0.0",
+  "description": "Audio/Video Framework Frontend",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "dependencies": {
+    "hls.js": "^1.4.12",
+    "dashjs": "^4.7.3",
+    "flv.js": "^1.6.2",
+    "axios": "^1.6.5"
+  },
+  "devDependencies": {
+    "vite": "^5.0.11",
+    "@vitejs/plugin-react": "^4.2.1",
+    "eslint": "^8.56.0"
+  }
+}

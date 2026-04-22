@@ -236,8 +236,8 @@
   </div>
 
   <script>
-    // WebRTC 配置
-    const WS_URL = 'ws://localhost:8081';
+    // WebRTC 配置 — 动态获取 host，localhost 或局域网 IP 都能正确连接后端
+    const WS_URL = `ws://${window.location.hostname}:8081`;
 
     let shareClient = null;
     let viewer = null;
@@ -341,18 +341,56 @@
           session_id: this.sessionId,
           sdp: JSON.stringify(offer)
         });
+
+        // 发送 session_id 获取前缓存的 ICE 候选
+        for (const candidate of this.iceCandidates) {
+          this.send({
+            type: 'ice_candidate',
+            session_id: this.sessionId,
+            candidate: JSON.stringify(candidate)
+          });
+        }
+        this.iceCandidates = [];
       }
 
       createPeerConnection() {
         const config = {
           iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' }
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            {
+              urls: 'turn:openrelay.metered.ca:80',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            }
           ]
         };
 
         this.pc = new RTCPeerConnection(config);
+        this.iceCandidates = [];
 
-        // 添加屏幕共享流
+        this.pc.onicecandidateerror = (event) => {
+            console.error('ICE candidate error:', event.errorCode, event.errorText, event.url);
+        };
+
+        this.pc.onicegatheringstatechange = () => {
+          console.log('🔍 ICE gathering state:', this.pc.iceGatheringState);
+        };
+
+        this.pc.oniceconnectionstatechange = () => {
+          console.log('🔍 ICE connection state:', this.pc.iceConnectionState);
+        };
+
         if (this.localStream) {
           this.localStream.getTracks().forEach(track => {
             this.pc.addTrack(track, this.localStream);
@@ -360,12 +398,19 @@
         }
 
         this.pc.onicecandidate = (event) => {
-          if (event.candidate && this.sessionId) {
-            this.send({
-              type: 'ice_candidate',
-              session_id: this.sessionId,
-              candidate: JSON.stringify(event.candidate)
-            });
+          if (event.candidate) {
+            console.log('🧊 ICE candidate:', event.candidate.type, event.candidate.address);
+            if (this.sessionId) {
+              this.send({
+                type: 'ice_candidate',
+                session_id: this.sessionId,
+                candidate: JSON.stringify(event.candidate)
+              });
+            } else {
+              this.iceCandidates.push(event.candidate);
+            }
+          } else {
+            console.log('🧊 ICE gathering complete');
           }
         };
 
@@ -476,26 +521,66 @@
       createPeerConnection() {
         const config = {
           iceServers: [
-            { urls: 'stun:stun.l.google.com:19302' }
+            { urls: 'stun:stun.l.google.com:19302' },
+            { urls: 'stun:stun1.l.google.com:19302' },
+            {
+              urls: 'turn:openrelay.metered.ca:80',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            },
+            {
+              urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+              username: 'openrelayproject',
+              credential: 'openrelayproject'
+            }
           ]
         };
 
         this.pc = new RTCPeerConnection(config);
+        this.pendingIceCandidates = [];
+
+        this.pc.onicecandidateerror = (event) => {
+            console.error('ICE candidate error:', event.errorCode, event.errorText, event.url);
+        };
+
+        this.pc.onicegatheringstatechange = () => {
+          console.log('🔍 ICE gathering state:', this.pc.iceGatheringState);
+        };
+
+        this.pc.oniceconnectionstatechange = () => {
+          console.log('🔍 ICE connection state:', this.pc.iceConnectionState);
+        };
 
         this.pc.onicecandidate = (event) => {
-          if (event.candidate && this.sessionId) {
-            this.send({
-              type: 'ice_candidate',
-              session_id: this.sessionId,
-              candidate: JSON.stringify(event.candidate)
-            });
+          if (event.candidate) {
+            console.log('🧊 ICE candidate:', event.candidate.type, event.candidate.address);
+            if (this.sessionId) {
+              this.send({
+                type: 'ice_candidate',
+                session_id: this.sessionId,
+                candidate: JSON.stringify(event.candidate)
+              });
+            }
+          } else {
+            console.log('🧊 ICE gathering complete');
           }
         };
 
         this.pc.ontrack = (event) => {
           console.log('📹 Received screen share track');
+          const track = event.track;
+          console.log('Track info:', track.kind, 'enabled:', track.enabled, 'readyState:', track.readyState, 'muted:', track.muted);
+          track.onmute = () => console.warn('Track muted');
+          track.onunmute = () => console.log('Track unmuted');
+          track.onended = () => console.warn('Track ended');
           if (this.onRemoteStream) {
-            const [remoteStream] = event.streams;
+            const remoteStream = event.streams[0] || new MediaStream([track]);
+            console.log('Stream tracks:', remoteStream.getTracks().length);
             this.onRemoteStream(remoteStream);
           }
         };
@@ -524,11 +609,21 @@
           session_id: this.sessionId,
           sdp: JSON.stringify(answer)
         });
+
+        // 刷新远程描述设置前缓存的 ICE 候选
+        for (const candidate of this.pendingIceCandidates) {
+          await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        }
+        this.pendingIceCandidates = [];
       }
 
       async handleICECandidate(candidateString) {
         const candidate = JSON.parse(candidateString);
-        await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        if (this.pc && this.pc.remoteDescription) {
+          await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } else {
+          this.pendingIceCandidates.push(candidate);
+        }
       }
 
       send(message) {
@@ -634,6 +729,11 @@
         viewer.onRemoteStream = (stream) => {
           const remoteVideo = document.getElementById('remoteVideo');
           remoteVideo.srcObject = stream;
+          remoteVideo.play().catch(err => {
+            console.warn('Autoplay blocked, trying muted play:', err);
+            remoteVideo.muted = true;
+            remoteVideo.play().catch(e => console.error('Play failed:', e));
+          });
           document.getElementById('viewPlaceholder').style.display = 'none';
           updateStatus('viewStatus', '✅ 已连接到屏幕共享！');
         };

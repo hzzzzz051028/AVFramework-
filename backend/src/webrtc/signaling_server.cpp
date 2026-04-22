@@ -70,6 +70,23 @@ bool SignalingServer::joinSession(const std::string& session_id, const std::stri
         client_to_session_[std::stoi(client_id)] = session_id;
     }
 
+    // If host already sent offer, forward it to the newly joined viewer
+    if (!it->second.host_sdp.empty()) {
+        nlohmann::json msg;
+        msg["type"] = "offer";
+        msg["offer"] = it->second.host_sdp;
+        ws_server_->send(std::stoi(client_id), msg.dump());
+    }
+
+    // Forward any buffered ICE candidates from host to viewer
+    for (const auto& candidate : it->second.host_ice_candidates) {
+        nlohmann::json msg;
+        msg["type"] = "ice";
+        msg["candidate"] = candidate;
+        msg["sender"] = it->second.host_client_id;
+        ws_server_->send(std::stoi(client_id), msg.dump());
+    }
+
     return true;
 }
 
@@ -107,22 +124,26 @@ void SignalingServer::exchangeSDP(const std::string& session_id, const std::stri
         return;
     }
 
-    nlohmann::json msg;
-    msg["type"] = "sdp";
-    msg["sdp"] = sdp;
-    msg["sender"] = client_id;
-
     std::string target_client_id;
+    std::string msg_type;
+    std::string sdp_field;
 
     if (it->second.host_client_id == client_id) {
         it->second.host_sdp = sdp;
         target_client_id = it->second.guest_client_id;
+        msg_type = "offer";
+        sdp_field = "offer";
     } else if (it->second.guest_client_id == client_id) {
         it->second.guest_sdp = sdp;
         target_client_id = it->second.host_client_id;
+        msg_type = "answer";
+        sdp_field = "sdp";
     }
 
     if (!target_client_id.empty()) {
+        nlohmann::json msg;
+        msg["type"] = msg_type;
+        msg[sdp_field] = sdp;
         ws_server_->send(std::stoi(target_client_id), msg.dump());
     }
 }

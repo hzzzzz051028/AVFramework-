@@ -1,6 +1,6 @@
 #pragma once
 
-#include <string>
+#include <utility>
 #include <functional>
 #include <memory>
 #include <unordered_map>
@@ -36,7 +36,7 @@ private:
     void serverLoop();
     void handleClient(int client_id);
     bool performHandshake(int client_fd, const std::string& handshake_data);
-    std::string decodeFrame(const std::string& frame);
+    std::pair<std::string, size_t> decodeFrame(const std::string& frame);
     std::string encodeFrame(const std::string& message);
     void removeClient(int client_id);
     static std::string base64_encode(const unsigned char* data, size_t len);

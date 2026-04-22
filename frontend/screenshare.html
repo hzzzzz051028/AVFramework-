@@ -307,6 +307,7 @@
               if (this.onSessionCreated) {
                 this.onSessionCreated(this.sessionId);
               }
+              await this.createAndSendOffer();
             } else if (message.type === 'answer') {
               await this.handleAnswer(message.sdp);
             } else if (message.type === 'ice') {
@@ -322,6 +323,12 @@
       async createSession() {
         this.createPeerConnection();
 
+        this.send({
+          type: 'create_session'
+        });
+      }
+
+      async createAndSendOffer() {
         const offer = await this.pc.createOffer({
           offerToReceiveVideo: false,
           offerToReceiveAudio: false
@@ -330,8 +337,9 @@
         await this.pc.setLocalDescription(offer);
 
         this.send({
-          type: 'create_session',
-          offer: JSON.stringify(offer)
+          type: 'offer',
+          session_id: this.sessionId,
+          sdp: JSON.stringify(offer)
         });
       }
 
@@ -352,7 +360,7 @@
         }
 
         this.pc.onicecandidate = (event) => {
-          if (event.candidate) {
+          if (event.candidate && this.sessionId) {
             this.send({
               type: 'ice_candidate',
               session_id: this.sessionId,
@@ -475,7 +483,7 @@
         this.pc = new RTCPeerConnection(config);
 
         this.pc.onicecandidate = (event) => {
-          if (event.candidate) {
+          if (event.candidate && this.sessionId) {
             this.send({
               type: 'ice_candidate',
               session_id: this.sessionId,

@@ -9,30 +9,31 @@ include_directories(
     ${CMAKE_SOURCE_DIR}/include
 )
 
+# 跨平台依赖查找
+if(APPLE)
+    set(OPENSSL_ROOT_DIR "/opt/homebrew/opt/openssl@3")
+elseif(UNIX)
+    set(OPENSSL_ROOT_DIR "/usr/local/opt/openssl@3")
+endif()
+
+find_package(OpenSSL REQUIRED)
+include_directories(${OPENSSL_INCLUDE_DIR})
+
 # 屏幕共享服务器源文件
 add_executable(screenshare-server
     src/screen_share_main.cpp
     src/webrtc/signaling_server.cpp
+    src/api/websocket_server.cpp
     src/utils/logger.cpp
 )
 
-# 创建一个简化的 WebSocket 服务器
-add_executable(screenshare-test
-    src/test_websocket.cpp
-)
-
-# Windows 链接库
 if(WIN32)
     target_link_libraries(screenshare-server ws2_32)
-    target_link_libraries(screenshare-test ws2_32)
+else()
+    target_link_libraries(screenshare-server OpenSSL::SSL OpenSSL::Crypto pthread)
 endif()
 
-# 设置输出目录
 set_target_properties(screenshare-server PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-)
-
-set_target_properties(screenshare-test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
 )
 
@@ -42,4 +43,5 @@ message(STATUS "========================================")
 message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 message(STATUS "Standard: C++${CMAKE_CXX_STANDARD}")
 message(STATUS "Platform: ${CMAKE_SYSTEM_NAME}")
+message(STATUS "OpenSSL: ${OPENSSL_INCLUDE_DIR}")
 message(STATUS "========================================")

@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>观看屏幕</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #1e3c72;
+      color: white;
+      padding: 2rem;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    h1 { margin-bottom: 2rem; }
+    .container {
+      background: rgba(255,255,255,0.1);
+      padding: 2rem;
+      border-radius: 12px;
+      text-align: center;
+      width: 100%;
+      max-width: 800px;
+    }
+    input {
+      padding: 1rem;
+      font-size: 1.2rem;
+      border-radius: 8px;
+      border: none;
+      width: 300px;
+      text-align: center;
+      margin: 1rem 0;
+    }
+    button {
+      padding: 1rem 2rem;
+      font-size: 1.2rem;
+      border: none;
+      border-radius: 8px;
+      background: #667eea;
+      color: white;
+      cursor: pointer;
+      margin: 0.5rem;
+    }
+    button:hover { background: #5568d3; }
+    #status { margin-top: 1rem; font-size: 1.1rem; }
+    video {
+      width: 100%;
+      max-width: 1200px;
+      margin-top: 2rem;
+      background: black;
+      border-radius: 12px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>观看屏幕</h1>
+
+  <div class="container">
+    <p>请输入会话 ID：</p>
+    <input type="text" id="sessionId" placeholder="例如: sess_abc123">
+    <br>
+    <button onclick="join()">连接</button>
+    <button onclick="disconnect()" style="display:none;" id="disconnectBtn">断开</button>
+    <p id="status">等待连接...</p>
+  </div>
+
+  <video id="video" autoplay playsinline></video>
+
+  <script>
+    const WS_URL = 'ws://10.10.30.213:8081';
+    let ws = null;
+    let pc = null;
+    let sessionId = null;
+
+    function setStatus(msg) {
+      document.getElementById('status').textContent = msg;
+    }
+
+    async function join() {
+      sessionId = document.getElementById('sessionId').value.trim();
+      if (!sessionId) {
+        alert('请输入会话 ID');
+        return;
+      }
+
+      setStatus('正在连接...');
+
+      try {
+        ws = new WebSocket(WS_URL);
+
+        ws.onopen = () => {
+          console.log('WebSocket connected');
+          ws.send(JSON.stringify({
+            type: 'join_session',
+            session_id: sessionId
+          }));
+        };
+
+        ws.onmessage = async (event) => {
+          const data = JSON.parse(event.data);
+          console.log('Received:', data.type);
+
+          if (data.type === 'offer') {
+            await handleOffer(data.offer);
+          } else if (data.type === 'ice') {
+            await handleIce(data.candidate);
+          } else if (data.type === 'error') {
+            setStatus('错误: ' + data.message);
+          }
+        };
+
+        ws.onerror = () => {
+          setStatus('连接失败');
+        };
+
+        ws.onclose = () => {
+          setStatus('连接已断开');
+        };
+
+      } catch (error) {
+        setStatus('错误: ' + error.message);
+      }
+    }
+
+    function createPeerConnection() {
+      pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws) {
+          ws.send(JSON.stringify({
+            type: 'ice_candidate',
+            session_id: sessionId,
+            candidate: JSON.stringify(event.candidate)
+          }));
+        }
+      };
+
+      pc.ontrack = (event) => {
+        console.log('Got remote stream');
+        const video = document.getElementById('video');
+        video.srcObject = event.streams[0];
+        video.style.display = 'block';
+        setStatus('已连接');
+        document.getElementById('disconnectBtn').style.display = 'inline-block';
+      };
+
+      pc.onconnectionstatechange = () => {
+        console.log('Connection state:', pc.connectionState);
+      };
+    }
+
+    async function handleOffer(offerStr) {
+      if (!pc) createPeerConnection();
+
+      const offer = JSON.parse(offerStr);
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      ws.send(JSON.stringify({
+        type: 'answer',
+        session_id: sessionId,
+        sdp: JSON.stringify(answer)
+      }));
+    }
+
+    async function handleIce(candidateStr) {
+      if (!pc) return;
+      const candidate = JSON.parse(candidateStr);
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    }
+
+    function disconnect() {
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+      if (ws) {
+        ws.close();
+        ws = null;
+      }
+      document.getElementById('video').style.display = 'none';
+      document.getElementById('disconnectBtn').style.display = 'none';
+      setStatus('已断开');
+    }
+  </script>
+</body>
+</html>

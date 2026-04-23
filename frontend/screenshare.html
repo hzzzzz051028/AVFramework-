@@ -1,0 +1,1275 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>屏幕共享系统 - 局域网版</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+      min-height: 100vh;
+      padding: 1rem;
+    }
+
+    .container {
+      max-width: 1600px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 350px;
+      gap: 1rem;
+    }
+
+    h1 {
+      color: white;
+      text-align: center;
+      margin-bottom: 1rem;
+      font-size: 1.8rem;
+    }
+
+    .main-panel {
+      min-width: 0;
+    }
+
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .mode-selector {
+      display: flex;
+      justify-content: center;
+      gap: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .mode-btn {
+      padding: 0.8rem 1.5rem;
+      font-size: 0.95rem;
+      border: none;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.1);
+      color: white;
+      cursor: pointer;
+      transition: all 0.3s;
+      backdrop-filter: blur(10px);
+    }
+
+    .mode-btn:hover {
+      background: rgba(255, 255, 255, 0.2);
+      transform: translateY(-2px);
+    }
+
+    .mode-btn.active {
+      background: rgba(102, 126, 234, 0.6);
+      box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+    }
+
+    .panel {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 1.5rem;
+      display: none;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .video-container {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: black;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+    }
+
+    .controls {
+      margin-top: 1rem;
+      display: flex;
+      gap: 0.8rem;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 0.6rem 1.2rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: all 0.3s;
+    }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+    }
+
+    .btn-danger {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      color: white;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.2);
+      color: white;
+    }
+
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status {
+      text-align: center;
+      color: white;
+      margin-top: 0.8rem;
+      font-size: 1rem;
+    }
+
+    .session-info {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 0.8rem;
+      margin-top: 0.8rem;
+      text-align: center;
+    }
+
+    .session-id {
+      font-size: 1.3rem;
+      font-weight: bold;
+      color: #10b981;
+      margin: 0.4rem 0;
+      user-select: all;
+    }
+
+    .input-group {
+      display: flex;
+      gap: 0.5rem;
+      justify-content: center;
+      margin-top: 0.5rem;
+    }
+
+    input[type="text"] {
+      padding: 0.6rem 0.8rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      width: 280px;
+      text-align: center;
+    }
+
+    .placeholder {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 1.1rem;
+      pointer-events: none;
+    }
+
+    /* 配置面板 */
+    .config-panel {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 1rem;
+    }
+
+    .config-panel h3 {
+      color: white;
+      font-size: 1rem;
+      margin-bottom: 0.8rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .config-item {
+      margin-bottom: 0.8rem;
+    }
+
+    .config-item label {
+      color: rgba(255, 255, 255, 0.8);
+      font-size: 0.85rem;
+      display: block;
+      margin-bottom: 0.3rem;
+    }
+
+    .config-item input {
+      width: 100%;
+      padding: 0.5rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+    }
+
+    .connection-status {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: white;
+      font-size: 0.85rem;
+      margin-top: 0.5rem;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ef4444;
+    }
+
+    .status-dot.connected {
+      background: #10b981;
+    }
+
+    .status-dot.connecting {
+      background: #f59e0b;
+      animation: pulse 1s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* 日志面板 */
+    .log-panel {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 1rem;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      max-height: 500px;
+    }
+
+    .log-panel h3 {
+      color: white;
+      font-size: 1rem;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .log-clear {
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: white;
+      padding: 0.3rem 0.6rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      cursor: pointer;
+    }
+
+    .log-container {
+      flex: 1;
+      overflow-y: auto;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 6px;
+      padding: 0.5rem;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 0.75rem;
+    }
+
+    .log-entry {
+      margin-bottom: 0.2rem;
+      word-wrap: break-word;
+    }
+
+    .log-time {
+      color: rgba(255, 255, 255, 0.5);
+    }
+
+    .log-info { color: #60a5fa; }
+    .log-success { color: #34d399; }
+    .log-warn { color: #fbbf24; }
+    .log-error { color: #f87171; }
+    .log-debug { color: rgba(255, 255, 255, 0.6); }
+
+    /* 重新连接提示 */
+    .reconnect-banner {
+      background: rgba(245, 158, 11, 0.3);
+      border: 1px solid rgba(245, 158, 11, 0.6);
+      border-radius: 8px;
+      padding: 0.8rem;
+      margin-top: 0.8rem;
+      text-align: center;
+      color: white;
+      font-size: 0.9rem;
+      display: none;
+    }
+
+    .reconnect-banner.show {
+      display: block;
+    }
+
+    @media (max-width: 1024px) {
+      .container {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="main-panel">
+      <h1>🖥️ 屏幕共享系统 - 局域网版</h1>
+
+      <div class="mode-selector">
+        <button class="mode-btn active" onclick="switchMode('share')" id="shareModeBtn">
+          📤 共享屏幕
+        </button>
+        <button class="mode-btn" onclick="switchMode('view')" id="viewModeBtn">
+          📥 观看屏幕
+        </button>
+      </div>
+
+      <!-- 共享屏幕面板 -->
+      <div class="panel active" id="sharePanel">
+        <h2 style="color: white; text-align: center; margin-bottom: 0.8rem; font-size: 1.2rem;">共享你的屏幕</h2>
+
+        <div class="video-container">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div class="placeholder" id="sharePlaceholder">点击开始共享屏幕</div>
+        </div>
+
+        <div class="controls">
+          <button class="btn btn-primary" id="startShareBtn" onclick="startScreenShare()">
+            🎬 开始共享
+          </button>
+          <button class="btn btn-danger" id="stopShareBtn" onclick="stopScreenShare()" style="display: none;">
+            🛑 停止共享
+          </button>
+        </div>
+
+        <div class="reconnect-banner" id="shareReconnectBanner">
+          <span>⚠️ 连接已断开，正在尝试重新连接...</span>
+        </div>
+
+        <div class="status" id="shareStatus">准备就绪</div>
+
+        <div class="session-info" id="shareSessionInfo" style="display: none;">
+          <div style="color: rgba(255,255,255,0.7); font-size: 0.9rem;">会话 ID</div>
+          <div class="session-id" id="shareSessionId"></div>
+          <div style="color: rgba(255,255,255,0.7); margin-top: 0.4rem; font-size: 0.85rem;">
+            在观看端输入此 ID 即可查看你的屏幕
+          </div>
+        </div>
+      </div>
+
+      <!-- 观看屏幕面板 -->
+      <div class="panel" id="viewPanel">
+        <h2 style="color: white; text-align: center; margin-bottom: 0.8rem; font-size: 1.2rem;">观看屏幕共享</h2>
+
+        <div class="video-container">
+          <video id="remoteVideo" autoplay playsinline></video>
+          <div class="placeholder" id="viewPlaceholder">输入会话 ID 开始观看</div>
+        </div>
+
+        <div class="controls">
+          <div class="input-group">
+            <input type="text" id="sessionIdInput" placeholder="输入会话 ID">
+            <button class="btn btn-primary" id="joinBtn" onclick="joinSession()">
+              🔗 连接
+            </button>
+          </div>
+          <button class="btn btn-danger" id="disconnectBtn" onclick="disconnect()" style="display: none;">
+            🛑 断开连接
+          </button>
+        </div>
+
+        <div class="reconnect-banner" id="viewReconnectBanner">
+          <span>⚠️ 连接已断开，正在尝试重新连接...</span>
+          <button class="btn btn-secondary" onclick="manualReconnect()" style="margin-left: 0.5rem; padding: 0.4rem 0.8rem; font-size: 0.8rem;">
+            立即重连
+          </button>
+        </div>
+
+        <div class="status" id="viewStatus">等待连接...</div>
+      </div>
+    </div>
+
+    <!-- 侧边栏 -->
+    <div class="side-panel">
+      <!-- 配置面板 -->
+      <div class="config-panel">
+        <h3>⚙️ 服务器配置</h3>
+
+        <div class="config-item">
+          <label for="serverUrl">WebSocket 服务器地址</label>
+          <input type="text" id="serverUrl" value="" placeholder="自动检测..." readonly>
+        </div>
+
+        <div class="connection-status">
+          <div class="status-dot" id="connectionStatusDot"></div>
+          <span id="connectionStatusText">未连接</span>
+        </div>
+
+        <div style="margin-top: 0.8rem;">
+          <button class="btn btn-secondary" onclick="testConnection()" style="width: 100%; font-size: 0.85rem;">
+            🔄 测试连接
+          </button>
+        </div>
+
+        <div style="margin-top: 0.8rem; padding-top: 0.8rem; border-top: 1px solid rgba(255,255,255,0.1);">
+          <label style="color: rgba(255,255,255,0.6); font-size: 0.75rem;">快速设置:</label>
+          <div style="display: flex; gap: 0.3rem; margin-top: 0.3rem; flex-wrap: wrap;">
+            <button class="btn btn-secondary" onclick="autoDetectServer()" style="padding: 0.3rem 0.5rem; font-size: 0.7rem;">自动检测</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 日志面板 -->
+      <div class="log-panel">
+        <h3>
+          <span>📋 日志</span>
+          <button class="log-clear" onclick="clearLogs()">清空</button>
+        </h3>
+        <div class="log-container" id="logContainer"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ========================================
+    // 日志系统
+    // ========================================
+    const LogLevel = {
+      DEBUG: 0,
+      INFO: 1,
+      SUCCESS: 2,
+      WARN: 3,
+      ERROR: 4
+    };
+
+    let currentLogLevel = LogLevel.INFO;
+
+    function log(level, category, message) {
+      if (level < currentLogLevel) return;
+
+      const timestamp = new Date().toLocaleTimeString();
+      const levelClass = ['log-debug', 'log-info', 'log-success', 'log-warn', 'log-error'][level];
+      const levelName = ['DEBUG', 'INFO', 'SUCCESS', 'WARN', 'ERROR'][level];
+
+      const logEntry = document.createElement('div');
+      logEntry.className = 'log-entry';
+      logEntry.innerHTML = `<span class="log-time">[${timestamp}]</span> <span class="${levelClass}">[${levelName}] [${category}]</span> ${message}`;
+
+      const container = document.getElementById('logContainer');
+      container.appendChild(logEntry);
+      container.scrollTop = container.scrollHeight;
+
+      // 限制日志数量
+      while (container.children.length > 100) {
+        container.removeChild(container.firstChild);
+      }
+    }
+
+    function clearLogs() {
+      document.getElementById('logContainer').innerHTML = '';
+      log(LogLevel.INFO, 'SYSTEM', 'Logs cleared');
+    }
+
+    // ========================================
+    // 配置管理
+    // ========================================
+    function getServerUrl() {
+      // 优先使用用户手动设置的地址
+      const savedUrl = localStorage.getItem('screenshare_server_url');
+      if (savedUrl) {
+        document.getElementById('serverUrl').value = savedUrl;
+        return savedUrl;
+      }
+
+      // 自动从当前页面 URL 构建 WebSocket URL
+      const wsUrl = buildWebSocketUrl();
+      document.getElementById('serverUrl').value = wsUrl;
+      return wsUrl;
+    }
+
+    function buildWebSocketUrl() {
+      // 获取当前页面的协议和主机
+      const protocol = window.location.protocol;
+      const host = window.location.hostname;
+      const port = window.location.port;
+
+      // 构建 WebSocket URL
+      // HTTP -> WS, HTTPS -> WSS
+      const wsProtocol = protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsPort = port || (protocol === 'https:' ? '443' : '80');
+
+      // 如果是默认端口，使用 8081 作为 WebSocket 端口
+      const finalWsPort = (port === '8080' || !port) ? '8081' : wsPort;
+
+      return `${wsProtocol}//${host}:${finalWsPort}`;
+    }
+
+    function setServerUrl(url) {
+      localStorage.setItem('screenshare_server_url', url);
+      document.getElementById('serverUrl').value = url;
+      log(LogLevel.INFO, 'CONFIG', `Server URL set to: ${url}`);
+    }
+
+    function autoDetectServer() {
+      localStorage.removeItem('screenshare_server_url');
+      const wsUrl = buildWebSocketUrl();
+      document.getElementById('serverUrl').value = wsUrl;
+      log(LogLevel.INFO, 'CONFIG', `Auto-detected server: ${wsUrl}`);
+    }
+
+    function updateConnectionStatus(status) {
+      const dot = document.getElementById('connectionStatusDot');
+      const text = document.getElementById('connectionStatusText');
+
+      dot.className = 'status-dot';
+
+      switch (status) {
+        case 'connected':
+          dot.classList.add('connected');
+          text.textContent = '已连接';
+          break;
+        case 'connecting':
+          dot.classList.add('connecting');
+          text.textContent = '连接中...';
+          break;
+        default:
+          text.textContent = '未连接';
+      }
+    }
+
+    async function testConnection() {
+      const url = getServerUrl();
+      log(LogLevel.INFO, 'TEST', `Testing connection to: ${url}`);
+
+      try {
+        const ws = new WebSocket(url);
+
+        ws.onopen = () => {
+          log(LogLevel.SUCCESS, 'TEST', 'Connection successful!');
+          updateConnectionStatus('connected');
+          ws.close();
+        };
+
+        ws.onerror = () => {
+          log(LogLevel.ERROR, 'TEST', 'Connection failed!');
+          updateConnectionStatus('disconnected');
+        };
+
+      } catch (error) {
+        log(LogLevel.ERROR, 'TEST', `Connection error: ${error.message}`);
+        updateConnectionStatus('disconnected');
+      }
+    }
+
+    // ========================================
+    // 屏幕共享客户端（带重连）
+    // ========================================
+    class ScreenShareClient {
+      constructor(wsUrl) {
+        this.wsUrl = wsUrl;
+        this.ws = null;
+        this.pc = null;
+        this.localStream = null;
+        this.sessionId = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 2000;
+        this.onSessionCreated = null;
+        this.onRemoteStream = null;
+        this.onStateChange = null;
+        this.onReconnecting = null;
+        this.onReconnected = null;
+      }
+
+      async startScreenShare() {
+        try {
+          this.localStream = await navigator.mediaDevices.getDisplayMedia({
+            video: { cursor: "always" },
+            audio: false
+          });
+
+          await this.connect();
+          await this.createSession();
+
+        } catch (error) {
+          log(LogLevel.ERROR, 'SHARE', `Failed to start: ${error.message}`);
+          throw error;
+        }
+      }
+
+      async connect() {
+        return new Promise((resolve, reject) => {
+          this.ws = new WebSocket(this.wsUrl);
+
+          this.ws.onopen = () => {
+            log(LogLevel.SUCCESS, 'WS', 'Connected to signaling server');
+            updateConnectionStatus('connected');
+            this.reconnectAttempts = 0;
+            this.setupMessageHandler();
+            resolve();
+          };
+
+          this.ws.onerror = (error) => {
+            log(LogLevel.ERROR, 'WS', 'Connection error');
+            reject(new Error('WebSocket connection failed'));
+          };
+
+          this.ws.onclose = (event) => {
+            log(LogLevel.WARN, 'WS', `Disconnected: ${event.code} ${event.reason || ''}`);
+            updateConnectionStatus('disconnected');
+            this.handleReconnect();
+          };
+        });
+      }
+
+      setupMessageHandler() {
+        this.ws.onmessage = async (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            log(LogLevel.DEBUG, 'WS', `Received: ${message.type}`);
+
+            switch (message.type) {
+              case 'pong':
+                log(LogLevel.DEBUG, 'WS', 'Pong received');
+                break;
+
+              case 'session_created':
+                this.sessionId = message.session_id;
+                if (this.onSessionCreated) {
+                  this.onSessionCreated(this.sessionId);
+                }
+                break;
+
+              case 'answer':
+                await this.handleAnswer(message.sdp);
+                break;
+
+              case 'ice':
+                await this.handleICECandidate(message.candidate);
+                break;
+
+              case 'error':
+                log(LogLevel.ERROR, 'WS', `Server error: ${message.message}`);
+                break;
+            }
+
+          } catch (error) {
+            log(LogLevel.ERROR, 'WS', `Message error: ${error.message}`);
+          }
+        };
+      }
+
+      async handleReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          log(LogLevel.ERROR, 'RECONNECT', 'Max reconnection attempts reached');
+          if (this.onReconnecting) {
+            this.onReconnecting(false);
+          }
+          return;
+        }
+
+        this.reconnectAttempts++;
+        const delay = this.reconnectDelay * this.reconnectAttempts;
+
+        log(LogLevel.WARN, 'RECONNECT', `Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+
+        if (this.onReconnecting) {
+          this.onReconnecting(true);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+
+        try {
+          this.ws = new WebSocket(this.wsUrl);
+
+          this.ws.onopen = () => {
+            log(LogLevel.SUCCESS, 'RECONNECT', 'Reconnected successfully!');
+            updateConnectionStatus('connected');
+            this.reconnectAttempts = 0;
+            this.setupMessageHandler();
+
+            if (this.onReconnected) {
+              this.onReconnected();
+            }
+          };
+
+          this.ws.onerror = () => {
+            log(LogLevel.ERROR, 'RECONNECT', 'Reconnection failed');
+            this.handleReconnect();
+          };
+
+          this.ws.onclose = () => {
+            this.handleReconnect();
+          };
+
+        } catch (error) {
+          log(LogLevel.ERROR, 'RECONNECT', `Error: ${error.message}`);
+          this.handleReconnect();
+        }
+      }
+
+      async createSession() {
+        this.createPeerConnection();
+
+        const offer = await this.pc.createOffer({
+          offerToReceiveVideo: false,
+          offerToReceiveAudio: false
+        });
+
+        await this.pc.setLocalDescription(offer);
+
+        this.send({
+          type: 'create_session',
+          offer: JSON.stringify(offer)
+        });
+      }
+
+      createPeerConnection() {
+        const config = {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+          ]
+        };
+
+        this.pc = new RTCPeerConnection(config);
+
+        if (this.localStream) {
+          this.localStream.getTracks().forEach(track => {
+            this.pc.addTrack(track, this.localStream);
+          });
+        }
+
+        this.pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            this.send({
+              type: 'ice_candidate',
+              session_id: this.sessionId,
+              candidate: JSON.stringify(event.candidate)
+            });
+          }
+        };
+
+        this.pc.onconnectionstatechange = () => {
+          log(LogLevel.DEBUG, 'RTC', `Connection state: ${this.pc.connectionState}`);
+          if (this.onStateChange) {
+            this.onStateChange(this.pc.connectionState);
+          }
+        };
+      }
+
+      async handleAnswer(sdpString) {
+        const answer = JSON.parse(sdpString);
+        await this.pc.setRemoteDescription(new RTCSessionDescription(answer));
+        log(LogLevel.SUCCESS, 'RTC', 'Remote description set');
+      }
+
+      async handleICECandidate(candidateString) {
+        const candidate = JSON.parse(candidateString);
+        await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+
+      send(message) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(message));
+          log(LogLevel.DEBUG, 'WS', `Sent: ${message.type}`);
+        }
+      }
+
+      stop() {
+        log(LogLevel.INFO, 'SHARE', 'Stopping screen share');
+
+        if (this.localStream) {
+          this.localStream.getTracks().forEach(track => track.stop());
+          this.localStream = null;
+        }
+
+        if (this.pc) {
+          this.pc.close();
+          this.pc = null;
+        }
+
+        if (this.ws) {
+          this.ws.close();
+          this.ws = null;
+        }
+
+        updateConnectionStatus('disconnected');
+      }
+    }
+
+    // ========================================
+    // 屏幕观看客户端（带重连）
+    // ========================================
+    class ScreenViewer {
+      constructor(wsUrl) {
+        this.wsUrl = wsUrl;
+        this.ws = null;
+        this.pc = null;
+        this.sessionId = null;
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 5;
+        this.reconnectDelay = 2000;
+        this.onRemoteStream = null;
+        this.onStateChange = null;
+        this.onReconnecting = null;
+        this.onReconnected = null;
+      }
+
+      async connect() {
+        return new Promise((resolve, reject) => {
+          this.ws = new WebSocket(this.wsUrl);
+
+          this.ws.onopen = () => {
+            log(LogLevel.SUCCESS, 'VIEWER', 'Connected to signaling server');
+            updateConnectionStatus('connected');
+            this.reconnectAttempts = 0;
+            this.setupMessageHandler();
+            resolve();
+          };
+
+          this.ws.onerror = (error) => {
+            log(LogLevel.ERROR, 'VIEWER', 'Connection error');
+            reject(new Error('WebSocket connection failed'));
+          };
+
+          this.ws.onclose = (event) => {
+            log(LogLevel.WARN, 'VIEWER', `Disconnected: ${event.code} ${event.reason || ''}`);
+            updateConnectionStatus('disconnected');
+            this.handleReconnect();
+          };
+        });
+      }
+
+      setupMessageHandler() {
+        this.ws.onmessage = async (event) => {
+          try {
+            const message = JSON.parse(event.data);
+            log(LogLevel.DEBUG, 'VIEWER', `Received: ${message.type}`);
+
+            switch (message.type) {
+              case 'pong':
+                break;
+
+              case 'offer':
+                await this.handleOffer(message.offer);
+                break;
+
+              case 'ice':
+                await this.handleICECandidate(message.candidate);
+                break;
+
+              case 'reconnected':
+                log(LogLevel.SUCCESS, 'VIEWER', 'Session reconnected');
+                break;
+
+              case 'error':
+                log(LogLevel.ERROR, 'VIEWER', `Server error: ${message.message}`);
+                break;
+            }
+
+          } catch (error) {
+            log(LogLevel.ERROR, 'VIEWER', `Message error: ${error.message}`);
+          }
+        };
+      }
+
+      async handleReconnect() {
+        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
+          log(LogLevel.ERROR, 'VIEWER', 'Max reconnection attempts reached');
+          if (this.onReconnecting) {
+            this.onReconnecting(false);
+          }
+          return;
+        }
+
+        this.reconnectAttempts++;
+        const delay = this.reconnectDelay * this.reconnectAttempts;
+
+        log(LogLevel.WARN, 'VIEWER', `Reconnecting ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+
+        if (this.onReconnecting) {
+          this.onReconnecting(true);
+        }
+
+        await new Promise(resolve => setTimeout(resolve, delay));
+
+        try {
+          this.ws = new WebSocket(this.wsUrl);
+
+          this.ws.onopen = () => {
+            log(LogLevel.SUCCESS, 'VIEWER', 'Reconnected successfully!');
+            updateConnectionStatus('connected');
+            this.reconnectAttempts = 0;
+            this.setupMessageHandler();
+
+            if (this.sessionId) {
+              this.send({
+                type: 'reconnect',
+                session_id: this.sessionId
+              });
+            }
+
+            if (this.onReconnected) {
+              this.onReconnected();
+            }
+          };
+
+          this.ws.onerror = () => {
+            this.handleReconnect();
+          };
+
+          this.ws.onclose = () => {
+            this.handleReconnect();
+          };
+
+        } catch (error) {
+          log(LogLevel.ERROR, 'VIEWER', `Reconnect error: ${error.message}`);
+          this.handleReconnect();
+        }
+      }
+
+      async joinSession(sessionId) {
+        this.sessionId = sessionId;
+        this.createPeerConnection();
+
+        this.send({
+          type: 'join_session',
+          session_id: sessionId
+        });
+
+        log(LogLevel.INFO, 'VIEWER', `Joining session: ${sessionId}`);
+      }
+
+      createPeerConnection() {
+        const config = {
+          iceServers: [
+            { urls: 'stun:stun.l.google.com:19302' }
+          ]
+        };
+
+        this.pc = new RTCPeerConnection(config);
+
+        this.pc.onicecandidate = (event) => {
+          if (event.candidate) {
+            this.send({
+              type: 'ice_candidate',
+              session_id: this.sessionId,
+              candidate: JSON.stringify(event.candidate)
+            });
+          }
+        };
+
+        this.pc.ontrack = (event) => {
+          log(LogLevel.SUCCESS, 'VIEWER', 'Received remote stream');
+          if (this.onRemoteStream) {
+            const [remoteStream] = event.streams;
+            this.onRemoteStream(remoteStream);
+          }
+        };
+
+        this.pc.onconnectionstatechange = () => {
+          log(LogLevel.DEBUG, 'VIEWER', `RTC state: ${this.pc.connectionState}`);
+          if (this.onStateChange) {
+            this.onStateChange(this.pc.connectionState);
+          }
+        };
+      }
+
+      async handleOffer(sdpString) {
+        if (!this.pc) {
+          this.createPeerConnection();
+        }
+
+        const offer = JSON.parse(sdpString);
+        await this.pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+        const answer = await this.pc.createAnswer();
+        await this.pc.setLocalDescription(answer);
+
+        this.send({
+          type: 'answer',
+          session_id: this.sessionId,
+          sdp: JSON.stringify(answer)
+        });
+
+        log(LogLevel.SUCCESS, 'VIEWER', 'Answer sent');
+      }
+
+      async handleICECandidate(candidateString) {
+        const candidate = JSON.parse(candidateString);
+        await this.pc.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+
+      send(message) {
+        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(message));
+          log(LogLevel.DEBUG, 'VIEWER', `Sent: ${message.type}`);
+        }
+      }
+
+      disconnect() {
+        log(LogLevel.INFO, 'VIEWER', 'Disconnecting');
+
+        if (this.pc) {
+          this.pc.close();
+          this.pc = null;
+        }
+
+        if (this.ws) {
+          this.ws.close();
+          this.ws = null;
+        }
+
+        updateConnectionStatus('disconnected');
+      }
+    }
+
+    // ========================================
+    // UI 函数
+    // ========================================
+    let shareClient = null;
+    let viewer = null;
+    let currentMode = 'share';
+
+    function switchMode(mode) {
+      currentMode = mode;
+
+      document.querySelectorAll('.mode-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(panel => panel.classList.remove('active'));
+
+      if (mode === 'share') {
+        document.getElementById('shareModeBtn').classList.add('active');
+        document.getElementById('sharePanel').classList.add('active');
+      } else {
+        document.getElementById('viewModeBtn').classList.add('active');
+        document.getElementById('viewPanel').classList.add('active');
+      }
+
+      log(LogLevel.INFO, 'UI', `Switched to ${mode} mode`);
+    }
+
+    async function startScreenShare() {
+      try {
+        // 详细诊断信息
+        log(LogLevel.DEBUG, 'DIAG', `Current URL: ${window.location.href}`);
+        log(LogLevel.DEBUG, 'DIAG', `Protocol: ${window.location.protocol}`);
+        log(LogLevel.DEBUG, 'DIAG', `Hostname: ${window.location.hostname}`);
+        log(LogLevel.DEBUG, 'DIAG', `Has mediaDevices: ${!!navigator.mediaDevices}`);
+        log(LogLevel.DEBUG, 'DIAG', `Has getDisplayMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia)}`);
+        log(LogLevel.DEBUG, 'DIAG', `User Agent: ${navigator.userAgent}`);
+
+        // 检查是否支持 getDisplayMedia
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+          const diagnostic = {
+            url: window.location.href,
+            protocol: window.location.protocol,
+            hasMediaDevices: !!navigator.mediaDevices,
+            hasGetDisplayMedia: !!(navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia),
+            userAgent: navigator.userAgent
+          };
+          log(LogLevel.ERROR, 'DIAG', 'API check failed', diagnostic);
+          throw new Error(`浏览器不支持屏幕共享 API\n\n诊断信息:\n当前URL: ${window.location.href}\n协议: ${window.location.protocol}\n\n请确保:\n1. 使用 Chrome/Edge/Firefox 最新版\n2. 通过 HTTP 服务器访问（如 http://10.10.30.213:8080）\n3. 不要直接打开 HTML 文件`);
+        }
+
+        // 检查访问协议
+        if (window.location.protocol === 'file:') {
+          throw new Error('不能直接打开 HTML 文件使用！\n\n请通过服务器访问：\nhttp://10.10.30.213:8080\n或\nhttp://localhost:8080');
+        }
+
+        updateStatus('shareStatus', '🔄 正在启动屏幕共享...');
+
+        const serverUrl = getServerUrl();
+        shareClient = new ScreenShareClient(serverUrl);
+
+        shareClient.onSessionCreated = (sessionId) => {
+          document.getElementById('shareSessionId').textContent = sessionId;
+          document.getElementById('shareSessionInfo').style.display = 'block';
+          updateStatus('shareStatus', `✅ 屏幕共享已启动！会话 ID: ${sessionId}`);
+          log(LogLevel.SUCCESS, 'SHARE', `Session created: ${sessionId}`);
+        };
+
+        shareClient.onStateChange = (state) => {
+          log(LogLevel.INFO, 'SHARE', `RTC state: ${state}`);
+        };
+
+        shareClient.onReconnecting = (isReconnecting) => {
+          const banner = document.getElementById('shareReconnectBanner');
+          banner.classList.toggle('show', isReconnecting);
+        };
+
+        await shareClient.startScreenShare();
+
+        const localVideo = document.getElementById('localVideo');
+        localVideo.srcObject = shareClient.localStream;
+        document.getElementById('sharePlaceholder').style.display = 'none';
+
+        document.getElementById('startShareBtn').style.display = 'none';
+        document.getElementById('stopShareBtn').style.display = 'inline-block';
+
+      } catch (error) {
+        log(LogLevel.ERROR, 'SHARE', `Start failed: ${error.message}`);
+        updateStatus('shareStatus', `❌ 启动失败: ${error.message}`);
+      }
+    }
+
+    function stopScreenShare() {
+      if (shareClient) {
+        shareClient.stop();
+        shareClient = null;
+      }
+
+      const localVideo = document.getElementById('localVideo');
+      localVideo.srcObject = null;
+      document.getElementById('sharePlaceholder').style.display = 'block';
+
+      document.getElementById('startShareBtn').style.display = 'inline-block';
+      document.getElementById('stopShareBtn').style.display = 'none';
+      document.getElementById('shareSessionInfo').style.display = 'none';
+      document.getElementById('shareReconnectBanner').classList.remove('show');
+
+      updateStatus('shareStatus', '准备就绪');
+      log(LogLevel.INFO, 'SHARE', 'Screen share stopped');
+    }
+
+    async function joinSession() {
+      const sessionId = document.getElementById('sessionIdInput').value.trim();
+
+      if (!sessionId) {
+        alert('请输入会话 ID');
+        return;
+      }
+
+      try {
+        updateStatus('viewStatus', '🔄 正在连接...');
+
+        const serverUrl = getServerUrl();
+        viewer = new ScreenViewer(serverUrl);
+        await viewer.connect();
+
+        viewer.onRemoteStream = (stream) => {
+          const remoteVideo = document.getElementById('remoteVideo');
+          remoteVideo.srcObject = stream;
+          document.getElementById('viewPlaceholder').style.display = 'none';
+          updateStatus('viewStatus', '✅ 已连接到屏幕共享！');
+          log(LogLevel.SUCCESS, 'VIEWER', 'Remote stream received');
+        };
+
+        viewer.onStateChange = (state) => {
+          log(LogLevel.INFO, 'VIEWER', `RTC state: ${state}`);
+          if (state === 'connected') {
+            document.getElementById('joinBtn').style.display = 'none';
+            document.getElementById('sessionIdInput').disabled = true;
+            document.getElementById('disconnectBtn').style.display = 'inline-block';
+          } else if (state === 'disconnected' || state === 'failed') {
+            updateStatus('viewStatus', '❌ 连接已断开');
+          }
+        };
+
+        viewer.onReconnecting = (isReconnecting) => {
+          const banner = document.getElementById('viewReconnectBanner');
+          banner.classList.toggle('show', isReconnecting);
+        };
+
+        await viewer.joinSession(sessionId);
+
+      } catch (error) {
+        log(LogLevel.ERROR, 'VIEWER', `Join failed: ${error.message}`);
+        updateStatus('viewStatus', `❌ 连接失败: ${error.message}`);
+      }
+    }
+
+    function disconnect() {
+      if (viewer) {
+        viewer.disconnect();
+        viewer = null;
+      }
+
+      const remoteVideo = document.getElementById('remoteVideo');
+      remoteVideo.srcObject = null;
+      document.getElementById('viewPlaceholder').style.display = 'block';
+
+      document.getElementById('joinBtn').style.display = 'inline-block';
+      document.getElementById('sessionIdInput').disabled = false;
+      document.getElementById('disconnectBtn').style.display = 'none';
+      document.getElementById('viewReconnectBanner').classList.remove('show');
+
+      updateStatus('viewStatus', '等待连接...');
+      log(LogLevel.INFO, 'VIEWER', 'Disconnected');
+    }
+
+    function manualReconnect() {
+      if (viewer && viewer.sessionId) {
+        log(LogLevel.INFO, 'VIEWER', 'Manual reconnection triggered');
+        viewer.handleReconnect();
+      }
+    }
+
+    function updateStatus(elementId, message) {
+      document.getElementById(elementId).textContent = message;
+    }
+
+    // ========================================
+    // 初始化
+    // ========================================
+    window.addEventListener('beforeunload', () => {
+      stopScreenShare();
+      disconnect();
+    });
+
+    // 加载保存的配置
+    document.addEventListener('DOMContentLoaded', () => {
+      // 自动设置 WebSocket URL
+      const wsUrl = buildWebSocketUrl();
+      const savedUrl = localStorage.getItem('screenshare_server_url');
+
+      if (savedUrl) {
+        document.getElementById('serverUrl').value = savedUrl;
+        log(LogLevel.INFO, 'SYSTEM', `Using saved server: ${savedUrl}`);
+      } else {
+        document.getElementById('serverUrl').value = wsUrl;
+        log(LogLevel.INFO, 'SYSTEM', `Auto-detected server: ${wsUrl}`);
+      }
+
+      log(LogLevel.INFO, 'SYSTEM', 'Screen share system initialized');
+      log(LogLevel.INFO, 'SYSTEM', `Page URL: ${window.location.href}`);
+    });
+
+    // 心跳检测
+    setInterval(() => {
+      if (shareClient && shareClient.ws && shareClient.ws.readyState === WebSocket.OPEN) {
+        shareClient.send({ type: 'ping' });
+      }
+      if (viewer && viewer.ws && viewer.ws.readyState === WebSocket.OPEN) {
+        viewer.send({ type: 'ping' });
+      }
+    }, 30000);
+  </script>
+</body>
+</html>

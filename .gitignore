@@ -1,0 +1,41 @@
+# Build outputs
+backend/build/
+backend/*.o
+backend/*.so
+backend/*.a
+avframework
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+
+# HLS and temporary files
+backend/hls/
+backend/temp/
+*.m3u8
+*.ts
+*.m4s
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Docker
+.docker/
+
+# Environment
+.env
+.env.local

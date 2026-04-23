@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-屏幕共享信令服务器 - Python 版本
-支持 HTTP 静态文件服务和 WebSocket 信令
+无线投屏接收器 - 主服务
+aiohttp HTTP/WebSocket 服务 + WHEP (RFC 9372) 信令
 """
 
 import asyncio
@@ -12,450 +12,407 @@ import socket
 import time
 from datetime import datetime
 from pathlib import Path
-from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
-import threading
 
-# 尝试导入 websockets
-try:
-    import websockets
-    HAS_WEBSOCKETS = True
-except ImportError:
-    HAS_WEBSOCKETS = False
-    print("警告: websockets 库未安装，请运行: pip install websockets")
+from aiohttp import web
+
+from config import config
+from gst.hardware import hardware
+from gst.receiver import StreamReceiverManager, HAS_GST
+from gst.compositor import CompositorManager
+from gst.audio_mixer import AudioManager
 
 # ========================================
-# 配置
-# ========================================
-HTTP_PORT = 8080
-WS_PORT = 8081
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-
-# ========================================
-# 日志配置
+# 日志
 # ========================================
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger(__name__)
 
 # ========================================
-# 获取本机局域网 IP
+# 路径
 # ========================================
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+# ========================================
+# 全局实例
+# ========================================
+receiver_manager = StreamReceiverManager(config=config)
+compositor = CompositorManager(config=config)
+audio_manager = AudioManager(config=config)
+
+
 def get_local_ip():
-    """获取本机局域网 IP 地址"""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except:
+    except Exception:
         return "localhost"
 
-# ========================================
-# 会话管理
-# ========================================
-class SessionManager:
-    """管理屏幕共享会话"""
-
-    def __init__(self):
-        self.sessions = {}  # session_id -> session_info
-        self.clients = {}   # client_id -> client_info
-        self.lock = threading.Lock()
-
-    def create_session(self, session_id, host_ws, offer=None):
-        """创建新会话"""
-        with self.lock:
-            self.sessions[session_id] = {
-                'session_id': session_id,
-                'host_ws': host_ws,
-                'guest_ws': None,
-                'offer': offer,
-                'created_at': datetime.now().isoformat()
-            }
-            logger.info(f"[SESSION] Created: {session_id}")
-
-    def join_session(self, session_id, guest_ws):
-        """加入会话"""
-        with self.lock:
-            if session_id not in self.sessions:
-                return False
-
-            self.sessions[session_id]['guest_ws'] = guest_ws
-            logger.info(f"[SESSION] Guest joined: {session_id}")
-            return True
-
-    def get_session(self, session_id):
-        """获取会话"""
-        return self.sessions.get(session_id)
-
-    def remove_session(self, session_id):
-        """删除会话"""
-        with self.lock:
-            if session_id in self.sessions:
-                del self.sessions[session_id]
-                logger.info(f"[SESSION] Removed: {session_id}")
-
-    def disconnect_guest(self, session_id):
-        """断开观看者"""
-        with self.lock:
-            if session_id in self.sessions:
-                self.sessions[session_id]['guest_ws'] = None
-                logger.info(f"[SESSION] Guest disconnected: {session_id}")
-
-# 全局会话管理器
-session_manager = SessionManager()
 
 # ========================================
-# HTTP 请求处理器
+# WHEP API (RFC 9372)
 # ========================================
-class HTTPRequestHandler(SimpleHTTPRequestHandler):
-    """自定义 HTTP 请求处理器"""
+async def whep_create_session(request):
+    """POST /api/sessions - 创建 WHEP 投屏会话"""
+    # 检查并发上限
+    max_sessions = config.max_sessions
+    if receiver_manager.session_count >= max_sessions:
+        return web.json_response(
+            {"error": "maximum sessions reached", "max": max_sessions},
+            status=429,
+        )
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(FRONTEND_DIR), **kwargs)
+    body = await request.json()
+    sdp_offer = body.get("sdp") or body.get("offer")
 
-    def log_message(self, format, *args):
-        """自定义日志格式"""
-        logger.info(f"[HTTP] {self.address_string()} - {format % args}")
+    if not sdp_offer:
+        return web.json_response({"error": "missing SDP offer"}, status=400)
 
-    def do_GET(self):
-        """处理 GET 请求"""
-        parsed_path = urlparse(self.path)
+    # 创建接收器
+    receiver = await receiver_manager.create_session()
 
-        # API 端点
-        if parsed_path.path == '/health':
-            self.send_health_check()
-            return
+    # 创建 GStreamer 管线
+    receiver.create_pipeline()
 
-        if parsed_path.path == '/info':
-            self.send_server_info()
-            return
+    # 设置 Offer → 生成 Answer (GLib 循环阻塞, 需要在线程中运行)
+    loop = asyncio.get_event_loop()
+    answer = await loop.run_in_executor(None, receiver.set_offer, sdp_offer)
 
-        # 根路径返回 screenshare.html
-        if parsed_path.path == '/' or parsed_path.path == '':
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.end_headers()
+    # 启动管线
+    receiver.start()
 
-            html_path = FRONTEND_DIR / 'screenshare.html'
-            if html_path.exists():
-                with open(html_path, 'rb') as f:
-                    self.wfile.write(f.read())
-                logger.info(f"[HTTP] Serving screenshare.html")
-            else:
-                self.send_error(404, 'File Not Found')
-            return
+    if not answer:
+        return web.json_response(
+            {"error": "failed to process SDP offer"},
+            status=500,
+        )
 
-        # 静态文件服务
-        super().do_GET()
+    return web.json_response(
+        {
+            "id": receiver.session_id,
+            "sdp": answer,
+            "status": receiver.state,
+        },
+        status=201,
+        headers={
+            "Location": f"/api/sessions/{receiver.session_id}",
+            "ETag": f'"{receiver.session_id}"',
+        },
+    )
 
-    def send_health_check(self):
-        """发送健康检查响应"""
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
 
-        data = {
-            'status': 'ok',
-            'timestamp': datetime.now().isoformat(),
-            'sessions': len(session_manager.sessions),
-            'clients': len(session_manager.clients)
-        }
-        self.wfile.write(json.dumps(data, indent=2).encode())
+async def whep_patch_session(request):
+    """PATCH /api/sessions/{id} - 添加 ICE candidates (trickle ICE)"""
+    session_id = request.match_info["id"]
+    receiver = await receiver_manager.get_session(session_id)
 
-    def send_server_info(self):
-        """发送服务器信息"""
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.end_headers()
+    if not receiver:
+        return web.json_response({"error": "session not found"}, status=404)
 
-        data = {
-            'server': 'Screen Share Signaling Server',
-            'version': '2.0.0 (Python)',
-            'ws_port': WS_PORT,
-            'http_port': HTTP_PORT,
-            'local_ip': get_local_ip(),
-            'sessions': [
-                {
-                    'session_id': s['session_id'],
-                    'host_connected': s['host_ws'] is not None,
-                    'guest_connected': s['guest_ws'] is not None,
-                    'created_at': s['created_at']
-                }
-                for s in session_manager.sessions.values()
-            ]
-        }
-        self.wfile.write(json.dumps(data, indent=2).encode())
+    body = await request.json()
+    candidates = body.get("candidates", [])
 
-    def end_headers(self):
-        """添加 CORS 头"""
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        super().end_headers()
+    for cand in candidates:
+        receiver.add_ice_candidate(
+            candidate=cand.get("candidate", ""),
+            sdp_mid=cand.get("sdpMid", "0"),
+            sdp_mline_index=cand.get("sdpMLineIndex", 0),
+        )
+
+    return web.json_response({"status": "ok"})
+
+
+async def whep_delete_session(request):
+    """DELETE /api/sessions/{id} - 断开会话"""
+    session_id = request.match_info["id"]
+    removed = await receiver_manager.remove_session(session_id)
+
+    if not removed:
+        return web.json_response({"error": "session not found"}, status=404)
+
+    return web.json_response({"status": "removed"})
+
 
 # ========================================
-# WebSocket 消息处理
+# 状态和控制 API
 # ========================================
-async def handle_websocket(websocket):
-    """处理 WebSocket 连接"""
-    client_id = id(websocket)
-    client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
+async def api_status(request):
+    """GET /api/status - 设备状态"""
+    return web.json_response({
+        "hardware": hardware.capabilities,
+        "compositor": compositor.get_status(),
+        "audio": audio_manager.get_status(),
+        "sessions": receiver_manager.get_status_list(),
+        "uptime": _get_uptime(),
+    })
 
-    logger.info(f"[WS] Client connected: {client_id} from {client_ip}")
+
+async def api_set_layout(request):
+    """PUT /api/display/layout - 切换布局"""
+    body = await request.json()
+    layout = body.get("layout", "auto")
+    compositor.set_layout(layout)
+    return web.json_response({"status": "ok", "layout": layout})
+
+
+async def api_set_volume(request):
+    """PUT /api/audio/master - 主音量"""
+    body = await request.json()
+    volume = body.get("volume", audio_manager.master_volume)
+    audio_manager.set_volume(volume)
+    return web.json_response({"status": "ok", "volume": audio_manager.master_volume})
+
+
+async def health_check(request):
+    """GET /health"""
+    return web.json_response({
+        "status": "ok",
+        "timestamp": datetime.now().isoformat(),
+        "gst_available": HAS_GST,
+        "sessions": receiver_manager.session_count,
+    })
+
+
+async def server_info(request):
+    """GET /info"""
+    return web.json_response({
+        "server": "Wireless Display Receiver",
+        "version": "3.0.0",
+        "platform": hardware.summary(),
+        "local_ip": get_local_ip(),
+        "http_port": config.http_port,
+        "ws_port": config.ws_port,
+        "max_sessions": config.max_sessions,
+        "gst_available": HAS_GST,
+        "sessions": receiver_manager.get_status_list(),
+    })
+
+
+# ========================================
+# WebSocket (向后兼容)
+# ========================================
+async def ws_handler(request):
+    """WebSocket 信令端点 (兼容旧版浏览器端)"""
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+
+    client_id = id(ws)
+    peer = request.remote or "unknown"
+    logger.info("[WS] 客户端连接: %s from %s", client_id, peer)
 
     try:
-        async for message in websocket:
-            try:
-                data = json.loads(message)
-                logger.info(f"[WS] {client_id}: {data.get('type')}")
-
-                await handle_message(websocket, client_id, data)
-
-            except json.JSONDecodeError:
-                logger.error(f"[WS] Invalid JSON from {client_id}")
-            except Exception as e:
-                logger.error(f"[WS] Error handling message: {e}")
-
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"[WS] Client disconnected: {client_id}")
-    except Exception as e:
-        logger.error(f"[WS] Error: {e}")
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    await handle_ws_message(ws, client_id, data)
+                except json.JSONDecodeError:
+                    await ws.send_json({"type": "error", "message": "invalid json"})
+            elif msg.type == web.WSMsgType.ERROR:
+                logger.error("[WS] 错误: %s", ws.exception())
     finally:
-        handle_disconnect(client_id)
+        await handle_ws_disconnect(ws, client_id)
+        logger.info("[WS] 客户端断开: %s", client_id)
 
-async def handle_message(websocket, client_id, data):
-    """处理收到的消息"""
+    return ws
 
-    msg_type = data.get('type')
 
-    # 心跳
-    if msg_type == 'ping':
-        await websocket.send(json.dumps({'type': 'pong'}))
+async def handle_ws_message(ws, client_id, data):
+    """处理 WebSocket 消息"""
+    msg_type = data.get("type")
+
+    if msg_type == "ping":
+        await ws.send_json({"type": "pong"})
         return
 
-    # 创建会话
-    if msg_type == 'create_session':
-        session_id = f"sess_{generate_id()}"
-        offer = data.get('offer')
-
-        session_manager.create_session(session_id, websocket, offer)
-
-        await websocket.send(json.dumps({
-            'type': 'session_created',
-            'session_id': session_id
-        }))
-
-        # 如果有 offer，广播给观看者
-        if offer:
-            await broadcast_offer(session_id)
-        return
-
-    # 加入会话
-    if msg_type == 'join_session':
-        session_id = data.get('session_id')
-
-        if not session_manager.join_session(session_id, websocket):
-            await websocket.send(json.dumps({
-                'type': 'error',
-                'message': 'Session not found'
-            }))
-            return
-
-        # 发送 offer
-        session = session_manager.get_session(session_id)
-        if session and session['offer']:
-            await websocket.send(json.dumps({
-                'type': 'offer',
-                'offer': session['offer']
-            }))
-        return
-
-    # 处理 Offer
-    if msg_type == 'offer':
-        session_id = data.get('session_id')
+    # WHEP over WebSocket (兼容模式)
+    if msg_type == "offer":
+        session_id = data.get("session_id")
         if not session_id:
+            session_id = f"ws_{int(time.time() * 1000) % 1000000}"
+
+        sdp_offer = data.get("sdp") or data.get("offer")
+        if not sdp_offer:
+            await ws.send_json({"type": "error", "message": "missing sdp"})
             return
 
-        session = session_manager.get_session(session_id)
-        if not session:
-            return
+        try:
+            receiver = await receiver_manager.create_session(session_id)
+            receiver.create_pipeline()
+            loop = asyncio.get_event_loop()
+            answer = await loop.run_in_executor(None, receiver.set_offer, sdp_offer)
+            receiver.start()
 
-        session['offer'] = data.get('offer')
-        session['host_ws'] = websocket
-
-        # 转发给观看者
-        if session['guest_ws']:
-            await session['guest_ws'].send(json.dumps({
-                'type': 'offer',
-                'offer': data.get('offer')
-            }))
-            logger.info(f"[SESSION] Offer sent to guest")
+            if answer:
+                await ws.send_json({
+                    "type": "answer",
+                    "session_id": session_id,
+                    "sdp": answer,
+                })
+            else:
+                await ws.send_json({"type": "error", "message": "failed to create answer"})
+        except ValueError as e:
+            await ws.send_json({"type": "error", "message": str(e)})
         return
 
-    # 处理 Answer
-    if msg_type == 'answer':
-        session_id = data.get('session_id')
-        if not session_id:
-            return
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return
-
-        if session['host_ws']:
-            await session['host_ws'].send(json.dumps({
-                'type': 'answer',
-                'sdp': data.get('sdp')
-            }))
-            logger.info(f"[SESSION] Answer sent to host")
+    if msg_type == "ice_candidate":
+        session_id = data.get("session_id")
+        if session_id:
+            receiver = await receiver_manager.get_session(session_id)
+            if receiver:
+                receiver.add_ice_candidate(
+                    candidate=data.get("candidate", ""),
+                    sdp_mid=data.get("sdpMid", "0"),
+                    sdp_mline_index=data.get("sdpMLineIndex", 0),
+                )
         return
 
-    # 处理 ICE 候选
-    if msg_type == 'ice_candidate':
-        session_id = data.get('session_id')
-        if not session_id:
-            return
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            return
-
-        # 确定目标客户端
-        target_ws = None
-        if session['host_ws'] == websocket:
-            target_ws = session['guest_ws']
-        else:
-            target_ws = session['host_ws']
-
-        if target_ws:
-            await target_ws.send(json.dumps({
-                'type': 'ice',
-                'candidate': data.get('candidate')
-            }))
-            logger.info(f"[SESSION] ICE candidate forwarded")
+    if msg_type == "set_layout":
+        layout = data.get("layout", "auto")
+        compositor.set_layout(layout)
+        await ws.send_json({"type": "layout_changed", "layout": layout})
         return
 
-    # 重连
-    if msg_type == 'reconnect':
-        session_id = data.get('session_id')
-        if not session_id:
-            return
+    logger.warning("[WS] 未知消息类型: %s", msg_type)
 
-        session = session_manager.get_session(session_id)
-        if not session:
-            await websocket.send(json.dumps({
-                'type': 'error',
-                'message': 'Session not found for reconnection'
-            }))
-            return
 
-        session['guest_ws'] = websocket
-        logger.info(f"[SESSION] Reconnected: {client_id} to {session_id}")
+async def handle_ws_disconnect(ws, client_id):
+    """清理断开连接"""
+    # 查找并清理该 ws 相关的会话
+    sessions = receiver_manager.get_status_list()
+    for s in sessions:
+        await receiver_manager.remove_session(s["session_id"])
 
-        await websocket.send(json.dumps({
-            'type': 'reconnected',
-            'session_id': session_id
-        }))
-        return
-
-    logger.warning(f"[WS] Unknown message type: {msg_type}")
-
-async def broadcast_offer(session_id):
-    """广播 offer"""
-    session = session_manager.get_session(session_id)
-    if session and session['offer']:
-        logger.info(f"[SESSION] Broadcasting offer for {session_id}")
-
-def handle_disconnect(client_id):
-    """处理客户端断开"""
-    # 查找并清理相关会话
-    to_remove = []
-    for session_id, session in session_manager.sessions.items():
-        if session['host_ws'] and id(session['host_ws']) == client_id:
-            to_remove.append(session_id)
-        elif session['guest_ws'] and id(session['guest_ws']) == client_id:
-            session_manager.disconnect_guest(session_id)
-
-    for session_id in to_remove:
-        session_manager.remove_session(session_id)
-
-def generate_id():
-    """生成随机 ID"""
-    import random
-    import string
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 # ========================================
-# 启动 HTTP 服务器
+# 静态文件
 # ========================================
-def start_http_server():
-    """启动 HTTP 服务器"""
-    server = HTTPServer(('0.0.0.0', HTTP_PORT), HTTPRequestHandler)
-    logger.info(f"[HTTP] Server started on port {HTTP_PORT}")
-    server.serve_forever()
+async def index_handler(request):
+    """首页 → 投屏发送端"""
+    sender_path = FRONTEND_DIR / "sender.html"
+    if sender_path.exists():
+        return web.FileResponse(sender_path)
+    # 回退到旧版
+    old_path = FRONTEND_DIR / "screenshare.html"
+    if old_path.exists():
+        return web.FileResponse(old_path)
+    return web.Response(text="Frontend not found", status=404)
+
+
+async def dashboard_handler(request):
+    """接收端状态面板"""
+    dash_path = FRONTEND_DIR / "dashboard.html"
+    if dash_path.exists():
+        return web.FileResponse(dash_path)
+    return web.Response(text="Dashboard not found", status=404)
+
 
 # ========================================
-# 启动 WebSocket 服务器
+# 应用工厂
 # ========================================
-async def start_websocket_server():
-    """启动 WebSocket 服务器"""
-    async with websockets.serve(handle_websocket, '0.0.0.0', WS_PORT):
-        logger.info(f"[WS] Server started on port {WS_PORT}")
-        await asyncio.Future()  # 永远运行
+_start_time = time.time()
+
+
+def _get_uptime():
+    return int(time.time() - _start_time)
+
+
+def create_app():
+    app = web.Application()
+
+    # REST API (WHEP)
+    app.router.add_post("/api/sessions", whep_create_session)
+    app.router.add_patch("/api/sessions/{id}", whep_patch_session)
+    app.router.add_delete("/api/sessions/{id}", whep_delete_session)
+
+    # 状态和控制
+    app.router.add_get("/api/status", api_status)
+    app.router.add_put("/api/display/layout", api_set_layout)
+    app.router.add_put("/api/audio/master", api_set_volume)
+
+    # 健康检查
+    app.router.add_get("/health", health_check)
+    app.router.add_get("/info", server_info)
+
+    # WebSocket
+    app.router.add_get("/ws", ws_handler)
+
+    # 页面
+    app.router.add_get("/", index_handler)
+    app.router.add_get("/dashboard", dashboard_handler)
+
+    # 静态文件
+    app.router.add_static("/static", FRONTEND_DIR, name="static")
+
+    # 启动/关闭钩子
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
+
+    return app
+
+
+async def on_startup(app):
+    logger.info("检测硬件能力...")
+    hardware.detect()
+
+    if not HAS_GST:
+        logger.warning("GStreamer 不可用 - WebRTC 接收器将运行在模拟模式")
+        logger.warning("安装方法: scripts/install-deps.sh (Linux)")
+
+    logger.info("硬件信息:\n%s", hardware.summary())
+
+
+async def on_cleanup(app):
+    logger.info("关闭所有会话...")
+    await receiver_manager.stop_all()
+
 
 # ========================================
 # 主函数
 # ========================================
 def main():
-    """主函数"""
     local_ip = get_local_ip()
+    http_port = config.http_port
+    ws_port = config.ws_port
 
     print("")
-    print("=" * 50)
-    print("   Screen Share Signaling Server v2.0")
-    print("   (Python Edition)")
-    print("=" * 50)
+    print("=" * 55)
+    print("   Wireless Display Receiver v3.0")
+    print("   (Python + GStreamer + WebRTC)")
+    print("=" * 55)
     print("")
-    print("[LAN Access]")
-    print(f"  Your IP:         {local_ip}")
-    print(f"  Web Interface:   http://{local_ip}:{HTTP_PORT}")
-    print(f"  WebSocket:       ws://{local_ip}:{WS_PORT}")
+    print("[接入方式]")
+    print(f"  本机 IP:        {local_ip}")
+    print(f"  Web 界面:       http://{local_ip}:{http_port}")
+    print(f"  WebSocket:      ws://{local_ip}:{ws_port}")
+    print(f"  WHEP 端点:      http://{local_ip}:{http_port}/api/sessions")
+    print(f"  状态面板:       http://{local_ip}:{http_port}/dashboard")
     print("")
-    print("[Info]")
-    print(f"  Other devices can open: http://{local_ip}:{HTTP_PORT}")
-    print(f"  in their browser to access the system.")
+    print("[硬件]")
+    print(f"  GStreamer:      {'已安装' if HAS_GST else '未安装 (模拟模式)'}")
+    print(f"  最大并发:       {config.max_sessions} 路")
     print("")
-    print("[Endpoints]")
-    print("  /               - Screen share web interface")
-    print("  /health         - Health check")
-    print("  /info           - Server information")
+    print("[API]")
+    print(f"  POST   /api/sessions          创建投屏会话")
+    print(f"  PATCH  /api/sessions/{{id}}     添加 ICE 候选")
+    print(f"  DELETE /api/sessions/{{id}}     断开会话")
+    print(f"  GET    /api/status            设备状态")
+    print(f"  PUT    /api/display/layout    切换布局")
+    print(f"  PUT    /api/audio/master      音量控制")
     print("")
-    print("Press Ctrl+C to stop")
-    print("=" * 50)
+    print("按 Ctrl+C 停止")
+    print("=" * 55)
     print("")
 
-    if not HAS_WEBSOCKETS:
-        print("错误: 请先安装 websockets 库")
-        print("运行: pip install websockets")
-        return
+    app = create_app()
+    web.run_app(app, host=config.server_host, port=http_port, print=None)
 
-    # 在单独线程中启动 HTTP 服务器
-    http_thread = threading.Thread(target=start_http_server, daemon=True)
-    http_thread.start()
 
-    # 启动 WebSocket 服务器
-    try:
-        asyncio.run(start_websocket_server())
-    except KeyboardInterrupt:
-        logger.info("[SERVER] Shutting down...")
-        print("\nServer stopped.")
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

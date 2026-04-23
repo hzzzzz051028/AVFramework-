@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>接收端状态面板</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+
+    .header {
+      max-width: 1000px;
+      margin: 0 auto 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .header h1 { font-size: 1.4rem; }
+
+    .header a {
+      color: #3b82f6;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+
+    .grid {
+      max-width: 1000px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 1rem;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 1.2rem;
+    }
+
+    .card h3 {
+      font-size: 0.85rem;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 1rem;
+    }
+
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+      font-size: 0.9rem;
+    }
+
+    .stat-row:last-child { border-bottom: none; }
+    .stat-label { color: #94a3b8; }
+    .stat-value { color: #e2e8f0; font-family: monospace; }
+
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.6rem;
+      border-radius: 9999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .badge-ok { background: rgba(34, 197, 94, 0.15); color: #22c55e; }
+    .badge-warn { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .badge-err { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+
+    .session-item {
+      background: rgba(0, 0, 0, 0.2);
+      border-radius: 8px;
+      padding: 0.8rem;
+      margin-bottom: 0.6rem;
+    }
+
+    .session-item:last-child { margin-bottom: 0; }
+
+    .session-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.5rem;
+    }
+
+    .session-id { font-family: monospace; font-size: 0.9rem; }
+
+    .controls { margin-top: 1rem; display: flex; gap: 0.5rem; }
+
+    .btn {
+      padding: 0.5rem 1rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+
+    .btn-primary { background: #3b82f6; color: white; }
+    .btn-danger { background: #ef4444; color: white; }
+    .btn-ghost { background: rgba(255,255,255,0.1); color: #94a3b8; }
+
+    .range-row {
+      display: flex;
+      align-items: center;
+      gap: 0.8rem;
+      margin-top: 0.5rem;
+    }
+
+    .range-row input[type="range"] {
+      flex: 1;
+      accent-color: #3b82f6;
+    }
+
+    .range-val {
+      font-family: monospace;
+      font-size: 0.85rem;
+      min-width: 40px;
+      text-align: right;
+    }
+
+    .empty {
+      color: #475569;
+      text-align: center;
+      padding: 2rem;
+      font-size: 0.9rem;
+    }
+
+    .refresh-time {
+      color: #475569;
+      font-size: 0.75rem;
+      text-align: right;
+      margin-top: 0.5rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>接收端状态面板</h1>
+    <a href="/">← 返回投屏页面</a>
+  </div>
+
+  <div class="grid">
+    <!-- 硬件状态 -->
+    <div class="card">
+      <h3>硬件状态</h3>
+      <div id="hwInfo">
+        <div class="empty">加载中...</div>
+      </div>
+    </div>
+
+    <!-- 合成器 / 显示 -->
+    <div class="card">
+      <h3>显示 & 布局</h3>
+      <div id="displayInfo">
+        <div class="empty">加载中...</div>
+      </div>
+      <div class="controls">
+        <button class="btn btn-ghost" onclick="setLayout('auto')">自动</button>
+        <button class="btn btn-ghost" onclick="setLayout('1x1')">1x1</button>
+        <button class="btn btn-ghost" onclick="setLayout('1x2')">1x2</button>
+        <button class="btn btn-ghost" onclick="setLayout('2x2')">2x2</button>
+        <button class="btn btn-ghost" onclick="setLayout('3x3')">3x3</button>
+      </div>
+    </div>
+
+    <!-- 音频 -->
+    <div class="card">
+      <h3>音频</h3>
+      <div id="audioInfo">
+        <div class="empty">加载中...</div>
+      </div>
+      <div class="range-row">
+        <span style="font-size:0.85rem;color:#94a3b8;">主音量</span>
+        <input type="range" id="volumeSlider" min="0" max="100" value="80" oninput="setVolume(this.value)">
+        <span class="range-val" id="volumeVal">80%</span>
+      </div>
+    </div>
+
+    <!-- 活跃会话 -->
+    <div class="card" style="grid-column: 1 / -1;">
+      <h3>活跃会话</h3>
+      <div id="sessionsInfo">
+        <div class="empty">加载中...</div>
+      </div>
+      <div class="refresh-time" id="refreshTime"></div>
+    </div>
+  </div>
+
+  <script>
+    const BASE = window.location.origin;
+
+    async function api(path, opts = {}) {
+      const resp = await fetch(BASE + path, opts);
+      return resp.json();
+    }
+
+    function badge(state) {
+      const map = {
+        connected: ['badge-ok', '已连接'],
+        connecting: ['badge-warn', '连接中'],
+        disconnected: ['badge', '已断开'],
+        failed: ['badge-err', '失败'],
+        created: ['badge-warn', '已创建'],
+      };
+      const [cls, text] = map[state] || ['badge', state || '未知'];
+      return `<span class="badge ${cls}">${text}</span>`;
+    }
+
+    async function refresh() {
+      try {
+        const status = await api('/api/status');
+        renderHardware(status.hardware);
+        renderDisplay(status.compositor);
+        renderAudio(status.audio);
+        renderSessions(status.sessions);
+        document.getElementById('refreshTime').textContent =
+          '更新于 ' + new Date().toLocaleTimeString();
+      } catch (e) {
+        console.error('刷新失败:', e);
+      }
+    }
+
+    function renderHardware(hw) {
+      const items = [
+        ['平台', `${hw.platform || '?'} (${hw.machine || '?'})`],
+        ['GStreamer', hw.gstreamer_available ? (hw.gst_version || '可用') : '未安装'],
+        ['MPP 硬解', hw.mpp_available ? '可用' : '不可用'],
+        ['RGA 硬缩放', hw.rga_available ? '可用' : '不可用'],
+        ['DRM/KMS', hw.drm_available ? '可用' : '不可用'],
+      ];
+      document.getElementById('hwInfo').innerHTML = items.map(([l, v]) => {
+        const ok = v === '可用' || (v !== '不可用' && v !== '未安装');
+        return `<div class="stat-row">
+          <span class="stat-label">${l}</span>
+          <span class="stat-value">${ok ? '<span class="badge badge-ok">' + v + '</span>' : '<span class="badge badge-err">' + v + '</span>'}</span>
+        </div>`;
+      }).join('');
+    }
+
+    function renderDisplay(comp) {
+      document.getElementById('displayInfo').innerHTML = `
+        <div class="stat-row">
+          <span class="stat-label">布局</span>
+          <span class="stat-value">${comp.layout || 'auto'}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">活跃流</span>
+          <span class="stat-value">${comp.active_streams}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">合成器</span>
+          <span class="stat-value">${comp.using_compositor ? '启用' : '绕过'}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">输出</span>
+          <span class="stat-value">${comp.display?.output || '?'}</span>
+        </div>
+      `;
+    }
+
+    function renderAudio(audio) {
+      document.getElementById('audioInfo').innerHTML = `
+        <div class="stat-row">
+          <span class="stat-label">状态</span>
+          <span class="stat-value">${audio.enabled ? '<span class="badge badge-ok">启用</span>' : '<span class="badge">禁用</span>'}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">活跃流</span>
+          <span class="stat-value">${audio.active_streams}</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">输出设备</span>
+          <span class="stat-value">${audio.output_device || 'auto'}</span>
+        </div>
+      `;
+      document.getElementById('volumeSlider').value = audio.master_volume;
+      document.getElementById('volumeVal').textContent = audio.master_volume + '%';
+    }
+
+    function renderSessions(sessions) {
+      if (!sessions || sessions.length === 0) {
+        document.getElementById('sessionsInfo').innerHTML = '<div class="empty">暂无活跃会话</div>';
+        return;
+      }
+
+      document.getElementById('sessionsInfo').innerHTML = sessions.map(s => `
+        <div class="session-item">
+          <div class="session-header">
+            <span class="session-id">${s.session_id}</span>
+            ${badge(s.state)}
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function setLayout(layout) {
+      try {
+        await api('/api/display/layout', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ layout }),
+        });
+        refresh();
+      } catch (e) {
+        console.error('布局设置失败:', e);
+      }
+    }
+
+    async function setVolume(val) {
+      document.getElementById('volumeVal').textContent = val + '%';
+      try {
+        await api('/api/audio/master', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ volume: parseInt(val) }),
+        });
+      } catch (e) {
+        console.error('音量设置失败:', e);
+      }
+    }
+
+    // 初始化
+    refresh();
+    setInterval(refresh, 3000);
+  </script>
+</body>
+</html>

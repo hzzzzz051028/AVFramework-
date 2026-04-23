@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>无线投屏 - 发送端</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1rem;
+    }
+
+    h1 { font-size: 1.6rem; margin-bottom: 1.5rem; color: #f8fafc; }
+
+    .main {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 1.5rem;
+    }
+
+    .card h3 {
+      font-size: 1rem;
+      color: #94a3b8;
+      margin-bottom: 1rem;
+    }
+
+    .video-wrap {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    video { width: 100%; height: 100%; object-fit: contain; }
+
+    .placeholder {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #475569;
+      font-size: 1.1rem;
+    }
+
+    .controls {
+      display: flex;
+      gap: 0.8rem;
+      justify-content: center;
+      margin-top: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      padding: 0.7rem 1.4rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: all 0.2s;
+      font-weight: 500;
+    }
+
+    .btn:hover { transform: translateY(-1px); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+    .btn-start {
+      background: #3b82f6;
+      color: white;
+    }
+
+    .btn-stop {
+      background: #ef4444;
+      color: white;
+    }
+
+    .btn-outline {
+      background: transparent;
+      color: #94a3b8;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+
+    .status-bar {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      padding: 0.6rem 1rem;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      font-size: 0.9rem;
+    }
+
+    .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #475569;
+      flex-shrink: 0;
+    }
+
+    .dot.active { background: #22c55e; }
+    .dot.connecting { background: #f59e0b; animation: pulse 1s infinite; }
+    .dot.error { background: #ef4444; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+
+    .config-row {
+      display: flex;
+      gap: 0.8rem;
+      align-items: center;
+      margin-bottom: 0.6rem;
+    }
+
+    .config-row label {
+      font-size: 0.85rem;
+      color: #94a3b8;
+      min-width: 90px;
+    }
+
+    .config-row input, .config-row select {
+      flex: 1;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      background: rgba(0, 0, 0, 0.3);
+      color: #e2e8f0;
+      font-size: 0.9rem;
+    }
+
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-size: 0.9rem;
+    }
+
+    .checkbox-row input[type="checkbox"] {
+      width: 16px; height: 16px;
+      accent-color: #3b82f6;
+    }
+
+    .log-area {
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 6px;
+      padding: 0.6rem;
+      font-family: 'Consolas', monospace;
+      font-size: 0.75rem;
+      max-height: 200px;
+      overflow-y: auto;
+      color: #64748b;
+    }
+
+    .log-area .info { color: #60a5fa; }
+    .log-area .ok { color: #34d399; }
+    .log-area .err { color: #f87171; }
+    .log-area .warn { color: #fbbf24; }
+
+    .session-badge {
+      display: inline-block;
+      padding: 0.4rem 0.8rem;
+      background: rgba(34, 197, 94, 0.15);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 6px;
+      color: #22c55e;
+      font-family: monospace;
+      font-size: 1.1rem;
+      user-select: all;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+      font-size: 0.85rem;
+    }
+
+    .info-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.4rem 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .info-item .label { color: #64748b; }
+    .info-item .value { color: #e2e8f0; font-family: monospace; }
+  </style>
+</head>
+<body>
+  <h1>无线投屏 - 发送端</h1>
+
+  <div class="main">
+    <!-- 视频预览 -->
+    <div class="card">
+      <h3>屏幕预览</h3>
+      <div class="video-wrap">
+        <video id="preview" autoplay muted playsinline></video>
+        <div class="placeholder" id="ph">点击下方按钮开始投屏</div>
+      </div>
+      <div class="controls">
+        <button class="btn btn-start" id="btnStart" onclick="startCast()">开始投屏</button>
+        <button class="btn btn-stop" id="btnStop" onclick="stopCast()" style="display:none;">停止投屏</button>
+      </div>
+    </div>
+
+    <!-- 状态 -->
+    <div class="status-bar" id="statusBar">
+      <div class="dot" id="dot"></div>
+      <span id="statusText">等待开始</span>
+    </div>
+
+    <!-- 会话信息 -->
+    <div class="card" id="sessionCard" style="display:none;">
+      <h3>会话信息</h3>
+      <div class="info-grid">
+        <div class="info-item"><span class="label">会话 ID</span><span class="value" id="sessionId">—</span></div>
+        <div class="info-item"><span class="label">状态</span><span class="value" id="rtcState">—</span></div>
+        <div class="info-item"><span class="label">编码器</span><span class="value" id="codecInfo">—</span></div>
+        <div class="info-item"><span class="label">分辨率</span><span class="value" id="resInfo">—</span></div>
+      </div>
+    </div>
+
+    <!-- 设置 -->
+    <div class="card">
+      <h3>投屏设置</h3>
+      <div class="checkbox-row" style="margin-bottom: 0.8rem;">
+        <input type="checkbox" id="chkAudio">
+        <label for="chkAudio">共享系统音频</label>
+      </div>
+      <div class="config-row">
+        <label>接收端地址</label>
+        <input type="text" id="serverAddr" placeholder="自动 (当前页面地址)">
+      </div>
+      <div class="config-row">
+        <label>信令模式</label>
+        <select id="signalingMode">
+          <option value="whep">WHEP (HTTP)</option>
+          <option value="ws">WebSocket (兼容)</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="card">
+      <h3>日志</h3>
+      <div class="log-area" id="logArea"></div>
+    </div>
+  </div>
+
+  <script>
+    let pc = null;
+    let localStream = null;
+    let sessionId = null;
+    let whepResourceUrl = null;
+
+    function log(cls, msg) {
+      const area = document.getElementById('logArea');
+      const t = new Date().toLocaleTimeString();
+      area.innerHTML += `<div><span style="color:#475569">[${t}]</span> <span class="${cls}">${msg}</span></div>`;
+      area.scrollTop = area.scrollHeight;
+      while (area.children.length > 80) area.removeChild(area.firstChild);
+    }
+
+    function setStatus(state, text) {
+      document.getElementById('dot').className = 'dot ' + ({connected:'active',connecting:'connecting',error:'error'}[state] || '');
+      document.getElementById('statusText').textContent = text;
+    }
+
+    function getBaseUrl() {
+      const custom = document.getElementById('serverAddr').value.trim();
+      if (custom) return custom.replace(/\/+$/, '');
+      return window.location.origin;
+    }
+
+    function getWsUrl() {
+      const base = getBaseUrl();
+      const url = new URL(base);
+      const wsProto = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${wsProto}//${url.host}/ws`;
+    }
+
+    async function startCast() {
+      try {
+        setStatus('connecting', '正在获取屏幕...');
+        log('info', '请求屏幕共享权限...');
+
+        const audio = document.getElementById('chkAudio').checked;
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always', displaySurface: 'monitor' },
+          audio: audio,
+        });
+
+        // 监听用户通过浏览器 UI 停止共享
+        localStream.getVideoTracks()[0].onended = () => stopCast();
+
+        document.getElementById('preview').srcObject = localStream;
+        document.getElementById('ph').style.display = 'none';
+
+        // 统计视频信息
+        const vt = localStream.getVideoTracks()[0];
+        const settings = vt.getSettings();
+        document.getElementById('resInfo').textContent =
+          `${settings.width || '?'}x${settings.height || '?'} @ ${settings.frameRate || '?'}fps`;
+
+        log('ok', `屏幕捕获: ${settings.width}x${settings.height}`);
+
+        const mode = document.getElementById('signalingMode').value;
+        if (mode === 'whep') {
+          await connectWHEP();
+        } else {
+          await connectWS();
+        }
+      } catch (e) {
+        setStatus('error', '启动失败: ' + e.message);
+        log('err', e.message);
+      }
+    }
+
+    // ---- WHEP 模式 ----
+
+    async function connectWHEP() {
+      setStatus('connecting', 'WHEP 信令协商中...');
+      log('info', '使用 WHEP 信令模式');
+
+      pc = createPeerConnection();
+
+      // 添加轨道
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      log('info', 'SDP Offer 已生成');
+
+      // 发送到 WHEP 端点
+      const baseUrl = getBaseUrl();
+      try {
+        const resp = await fetch(baseUrl + '/api/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sdp: offer.sdp }),
+        });
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          throw new Error(err.error || `HTTP ${resp.status}`);
+        }
+
+        const data = await resp.json();
+        sessionId = data.id;
+        whepResourceUrl = baseUrl + '/api/sessions/' + sessionId;
+
+        document.getElementById('sessionId').textContent = sessionId;
+        document.getElementById('sessionCard').style.display = 'block';
+
+        const answer = new RTCSessionDescription({ type: 'answer', sdp: data.sdp });
+        await pc.setRemoteDescription(answer);
+        log('ok', 'WHEP 会话已建立: ' + sessionId);
+      } catch (e) {
+        setStatus('error', 'WHEP 连接失败: ' + e.message);
+        log('err', 'WHEP: ' + e.message);
+        return;
+      }
+
+      // Trickle ICE
+      pc.onicecandidate = async (event) => {
+        if (!event.candidate || !whepResourceUrl) return;
+        try {
+          await fetch(whepResourceUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ candidates: [event.candidate.toJSON()] }),
+          });
+        } catch (e) {
+          log('warn', 'ICE 候选发送失败: ' + e.message);
+        }
+      };
+
+      document.getElementById('btnStart').style.display = 'none';
+      document.getElementById('btnStop').style.display = 'inline-block';
+    }
+
+    // ---- WebSocket 兼容模式 ----
+
+    async function connectWS() {
+      setStatus('connecting', 'WebSocket 信令协商中...');
+      log('info', '使用 WebSocket 信令模式');
+
+      const wsUrl = getWsUrl();
+      let ws;
+
+      await new Promise((resolve, reject) => {
+        ws = new WebSocket(wsUrl);
+        ws.onopen = resolve;
+        ws.onerror = () => reject(new Error('WebSocket 连接失败'));
+      });
+
+      log('ok', 'WebSocket 已连接');
+
+      pc = createPeerConnection();
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      sessionId = 'ws_' + Date.now().toString(36);
+
+      ws.send(JSON.stringify({
+        type: 'offer',
+        session_id: sessionId,
+        sdp: JSON.stringify(offer),
+      }));
+
+      document.getElementById('sessionId').textContent = sessionId;
+      document.getElementById('sessionCard').style.display = 'block';
+
+      pc.onicecandidate = (event) => {
+        if (!event.candidate) return;
+        ws.send(JSON.stringify({
+          type: 'ice_candidate',
+          session_id: sessionId,
+          candidate: JSON.stringify(event.candidate),
+        }));
+      };
+
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'answer') {
+          const answer = JSON.parse(msg.sdp);
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          log('ok', '收到 SDP Answer');
+        }
+      };
+
+      document.getElementById('btnStart').style.display = 'none';
+      document.getElementById('btnStop').style.display = 'inline-block';
+    }
+
+    // ---- 公共 ----
+
+    function createPeerConnection() {
+      const conn = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+      });
+
+      conn.onconnectionstatechange = () => {
+        const s = conn.connectionState;
+        document.getElementById('rtcState').textContent = s;
+        log('info', 'RTC: ' + s);
+
+        if (s === 'connected') setStatus('connected', '投屏中');
+        else if (s === 'disconnected') setStatus('error', '连接断开');
+        else if (s === 'failed') setStatus('error', '连接失败');
+      };
+
+      conn.oniceconnectionstatechange = () => {
+        log('info', 'ICE: ' + conn.iceConnectionState);
+      };
+
+      // 检测编码器
+      conn.getSenders().forEach(sender => {
+        if (sender.track && sender.track.kind === 'video') {
+          sender.oncodecchange = () => {
+            const params = sender.getParameters();
+            const codec = params.codecs?.[0];
+            if (codec) {
+              document.getElementById('codecInfo').textContent =
+                `${codec.mimeType.replace('video/', '')} ${codec.clockRate}`;
+              log('info', '编码器: ' + codec.mimeType);
+            }
+          };
+        }
+      });
+
+      return conn;
+    }
+
+    function stopCast() {
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+
+      document.getElementById('preview').srcObject = null;
+      document.getElementById('ph').style.display = 'block';
+      document.getElementById('btnStart').style.display = 'inline-block';
+      document.getElementById('btnStop').style.display = 'none';
+      document.getElementById('sessionCard').style.display = 'none';
+
+      sessionId = null;
+      whepResourceUrl = null;
+      setStatus('', '已停止');
+      log('info', '投屏已停止');
+    }
+
+    window.addEventListener('beforeunload', stopCast);
+  </script>
+</body>
+</html>

@@ -68,10 +68,12 @@
     <p id="status">等待连接...</p>
   </div>
 
-  <video id="video" autoplay playsinline></video>
+  <video id="video" autoplay playsinline muted></video>
 
   <script>
-    const WS_URL = 'ws://10.10.30.213:8081';
+    // 动态获取 WebSocket URL
+    const wsHost = window.location.hostname || 'localhost';
+    const WS_URL = `ws://${wsHost}:8081`;
     let ws = null;
     let pc = null;
     let sessionId = null;
@@ -93,7 +95,8 @@
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
-          console.log('WebSocket connected');
+          console.log('[WS] WebSocket 已连接');
+          setStatus('已连接服务器，加入会话...');
           ws.send(JSON.stringify({
             type: 'join_session',
             session_id: sessionId
@@ -102,22 +105,30 @@
 
         ws.onmessage = async (event) => {
           const data = JSON.parse(event.data);
-          console.log('Received:', data.type);
+          console.log('[WS] 收到消息:', data.type);
 
           if (data.type === 'offer') {
-            await handleOffer(data.offer);
-          } else if (data.type === 'ice') {
+            console.log('[WS] 收到 Offer，开始处理...');
+            await handleOffer(data.sdp);
+          } else if (data.type === 'ice_candidate') {
+            console.log('[WS] 收到 ICE 候选');
             await handleIce(data.candidate);
           } else if (data.type === 'error') {
+            console.error('[WS] 错误:', data.message);
             setStatus('错误: ' + data.message);
+          } else if (data.type === 'session_ended') {
+            console.warn('[WS] 会话已结束');
+            setStatus('会话已结束');
           }
         };
 
-        ws.onerror = () => {
+        ws.onerror = (error) => {
+          console.error('[WS] WebSocket 错误:', error);
           setStatus('连接失败');
         };
 
         ws.onclose = () => {
+          console.log('[WS] WebSocket 连接关闭');
           setStatus('连接已断开');
         };
 
@@ -127,48 +138,90 @@
     }
 
     function createPeerConnection() {
-      pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      });
+      console.log('[PC] 创建 PeerConnection');
+      const config = {
+        iceServers: [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ]
+      };
+      pc = new RTCPeerConnection(config);
+
+      // ICE 收集状态
+      pc.onicegatheringstatechange = () => {
+        console.log('[PC] ICE 收集状态:', pc.iceGatheringState);
+      };
 
       pc.onicecandidate = (event) => {
-        if (event.candidate && ws) {
+        if (event.candidate) {
+          console.log('[PC] 发送 ICE 候选:', event.candidate.candidate.split(':')[0]);
           ws.send(JSON.stringify({
             type: 'ice_candidate',
             session_id: sessionId,
             candidate: JSON.stringify(event.candidate)
           }));
+        } else {
+          console.log('[PC] ICE 候选收集完成');
         }
       };
 
       pc.ontrack = (event) => {
-        console.log('Got remote stream');
+        console.log('[PC] 收到远程轨道:', event.track.kind, '标签:', event.track.label);
+        console.log('[PC] 流数量:', event.streams.length);
+
         const video = document.getElementById('video');
         video.srcObject = event.streams[0];
         video.style.display = 'block';
-        setStatus('已连接');
+
+        // 尝试播放
+        video.play().then(() => {
+          console.log('[Video] 播放成功');
+          setStatus('已连接 - 视频播放中');
+        }).catch(err => {
+          console.error('[Video] 播放失败:', err);
+          setStatus('错误: 视频播放失败 - ' + err.message);
+        });
+
         document.getElementById('disconnectBtn').style.display = 'inline-block';
       };
 
       pc.onconnectionstatechange = () => {
-        console.log('Connection state:', pc.connectionState);
+        console.log('[PC] 连接状态:', pc.connectionState);
+        if (pc.connectionState === 'connected') {
+          console.log('[PC] WebRTC 连接成功!');
+        } else if (pc.connectionState === 'failed') {
+          console.error('[PC] WebRTC 连接失败');
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        console.log('[PC] ICE 连接状态:', pc.iceConnectionState);
       };
     }
 
     async function handleOffer(offerStr) {
+      console.log('[Offer] 处理 SDP Offer...');
       if (!pc) createPeerConnection();
 
       const offer = JSON.parse(offerStr);
+      console.log('[Offer] Offer 类型:', offer.type);
+      console.log('[Offer] 媒体数量:', (offer.sdp || '').split('m=').length - 1);
+
       await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      console.log('[Offer] Remote Description 已设置');
 
       const answer = await pc.createAnswer();
+      console.log('[Offer] Answer 已创建');
+
       await pc.setLocalDescription(answer);
+      console.log('[Offer] Local Description 已设置');
 
       ws.send(JSON.stringify({
         type: 'answer',
         session_id: sessionId,
         sdp: JSON.stringify(answer)
       }));
+      console.log('[Offer] Answer 已发送');
     }
 
     async function handleIce(candidateStr) {

@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>投屏发送端 - 内置终端</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+    h1 { font-size: 1.6rem; margin-bottom: 1rem; color: #f8fafc; }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+    .panel {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+    }
+    .panel h3 {
+      font-size: 0.9rem;
+      color: #94a3b8;
+      margin-bottom: 0.8rem;
+    }
+    .video-wrap {
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border-radius: 8px;
+      overflow: hidden;
+      position: relative;
+    }
+    video { width: 100%; height: 100%; object-fit: contain; }
+    .placeholder {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      color: #475569;
+    }
+    .terminal-wrap {
+      aspect-ratio: 16 / 9;
+      background: #0d1117;
+      border-radius: 8px;
+      overflow: hidden;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 14px;
+      line-height: 1.4;
+      display: flex;
+      flex-direction: column;
+    }
+    .terminal-header {
+      background: #21262d;
+      padding: 0.5rem 1rem;
+      font-size: 12px;
+      color: #8b949e;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .terminal-content {
+      flex: 1;
+      padding: 1rem;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .terminal-line { margin-bottom: 2px; }
+    .prompt { color: #58a6ff; }
+    .output { color: #c9d1d9; }
+    .error { color: #ff7b72; }
+    .success { color: #3fb950; }
+    .timestamp {
+      color: #484f58;
+      font-size: 12px;
+      margin-right: 0.5rem;
+    }
+    .controls {
+      display: flex;
+      gap: 0.8rem;
+      margin-top: 1rem;
+    }
+    .btn {
+      padding: 0.7rem 1.4rem;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: #3b82f6; color: white; }
+    .btn-primary:hover { background: #2563eb; }
+    .btn-danger { background: #ef4444; color: white; }
+    .btn-danger:hover { background: #dc2626; }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .status {
+      padding: 0.8rem 1rem;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      text-align: center;
+      color: #94a3b8;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+    }
+    .info-box {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      border-radius: 8px;
+      padding: 0.8rem;
+      margin-top: 1rem;
+      font-size: 0.85rem;
+    }
+    .info-box strong { color: #22c55e; }
+  </style>
+</head>
+<body>
+  <h1>🖥️ 投屏发送端 - 内置终端模式</h1>
+
+  <div class="container">
+    <!-- 视频预览 -->
+    <div class="panel">
+      <h3>屏幕预览</h3>
+      <div class="video-wrap">
+        <video id="preview" autoplay muted playsinline></video>
+        <div class="placeholder" id="ph">点击"开始投屏"启动</div>
+      </div>
+      <div class="controls">
+        <button class="btn btn-primary" id="btnStart" onclick="startCast()">开始投屏</button>
+        <button class="btn btn-danger" id="btnStop" onclick="stopCast()" style="display:none;">停止投屏</button>
+      </div>
+      <div class="status" id="status">等待开始</div>
+    </div>
+
+    <!-- 终端区域 -->
+    <div class="panel">
+      <h3>本地终端（将被一起投屏）</h3>
+      <div class="terminal-wrap">
+        <div class="terminal-header">
+          <span>Terminal - bash</span>
+          <span id="terminalTime">--:--:--</span>
+        </div>
+        <div class="terminal-content" id="terminal">
+          <div class="terminal-line"><span class="output">Welcome to Terminal Share Mode</span></div>
+          <div class="terminal-line"><span class="output">Type commands below, they will be visible on the receiver.</span></div>
+          <div class="terminal-line"></div>
+        </div>
+      </div>
+      <div class="controls">
+        <input type="text" id="cmdInput" placeholder="输入命令..." style="flex:1;padding:0.5rem;border-radius:6px;border:1px solid rgba(255,255,255,0.1);background:rgba(0,0,0,0.3);color:#e2e8f0;font-family:monospace;" onkeypress="handleInput(event)">
+        <button class="btn" onclick="executeCommand()" style="background:rgba(255,255,255,0.1);color:#94a3b8;">执行</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box">
+    <strong>💡 使用说明</strong><br>
+    这个页面包含屏幕预览和终端区域。当你点击"开始投屏"并选择"标签页"共享此页面时，<br>
+    接收端将同时看到屏幕预览和终端输出。终端会在接收端的显示器上实时更新！
+  </div>
+
+  <script>
+    let pc = null;
+    let localStream = null;
+    let sessionId = null;
+
+    function setStatus(msg) {
+      document.getElementById('status').textContent = msg;
+    }
+
+    async function startCast() {
+      try {
+        setStatus('正在获取屏幕...');
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+          video: { cursor: 'always', displaySurface: 'monitor' },
+          audio: false
+        });
+
+        localStream.getVideoTracks()[0].onended = () => stopCast();
+
+        document.getElementById('preview').srcObject = localStream;
+        document.getElementById('ph').style.display = 'none';
+
+        // TODO: 这里应该连接到 RK3588 信令服务器
+        // 简化版：直接显示会话 ID
+        sessionId = 'sess_' + Date.now();
+        setStatus(`投屏中！会话 ID: ${sessionId}。请共享此标签页以包含终端。`);
+
+        document.getElementById('btnStart').style.display = 'none';
+        document.getElementById('btnStop').style.display = 'inline-block';
+
+        // 在终端显示投屏开始
+        addTerminalLine('========================================', 'success');
+        addTerminalLine('Screen sharing started', 'success');
+        addTerminalLine(`Session ID: ${sessionId}`, 'output');
+        addTerminalLine('Share THIS TAB to include the terminal!', 'success');
+        addTerminalLine('========================================', 'output');
+        addTerminalLine('', 'output');
+
+      } catch (e) {
+        setStatus('错误: ' + e.message);
+      }
+    }
+
+    function stopCast() {
+      if (localStream) {
+        localStream.getTracks().forEach(t => t.stop());
+        localStream = null;
+      }
+      document.getElementById('preview').srcObject = null;
+      document.getElementById('ph').style.display = 'block';
+      document.getElementById('btnStart').style.display = 'inline-block';
+      document.getElementById('btnStop').style.display = 'none';
+      setStatus('已停止');
+
+      addTerminalLine('Screen sharing stopped', 'error');
+    }
+
+    // 终端功能
+    function addTerminalLine(content, type = 'output') {
+      const terminal = document.getElementById('terminal');
+      const line = document.createElement('div');
+      line.className = 'terminal-line';
+
+      const time = document.createElement('span');
+      time.className = 'timestamp';
+      time.textContent = `[${new Date().toLocaleTimeString()}]`;
+
+      const text = document.createElement('span');
+      text.className = type;
+      text.textContent = content;
+
+      line.appendChild(time);
+      line.appendChild(text);
+      terminal.appendChild(line);
+
+      terminal.scrollTop = terminal.scrollHeight;
+
+      // 限制行数
+      while (terminal.children.length > 100) {
+        terminal.removeChild(terminal.firstChild);
+      }
+    }
+
+    function handleInput(event) {
+      if (event.key === 'Enter') {
+        executeCommand();
+      }
+    }
+
+    function executeCommand() {
+      const input = document.getElementById('cmdInput');
+      const cmd = input.value.trim();
+
+      if (!cmd) return;
+
+      // 显示命令
+      addTerminalLine(`$ ${cmd}`, 'prompt');
+      input.value = '';
+
+      // 模拟执行（实际应该连接到后端 WebSocket 执行真实命令）
+      simulateCommand(cmd);
+    }
+
+    function simulateCommand(cmd) {
+      // 模拟一些常见命令的输出
+      const outputs = {
+        'ls': 'Documents  Downloads  Pictures  desktop.ini',
+        'ls -la': `drwxr-xr-x  5 user user 4096 Apr 27 10:00 .
+drwxr-xr-x  3 root root 4096 Apr 27 09:00 ..
+-rw-r--r--  1 user user  220 Apr 27 09:00 .bash_logout`,
+        'pwd': '/home/user',
+        'whoami': 'user',
+        'date': new Date().toString(),
+        'uname -a': 'Linux localhost 5.10.0 #1 SMP PREEMPT',
+        'clear': '',
+        'help': 'Available commands: ls, pwd, whoami, date, uname, clear, help, echo',
+      };
+
+      if (cmd === 'clear') {
+        document.getElementById('terminal').innerHTML = '';
+        return;
+      }
+
+      if (cmd.startsWith('echo ')) {
+        addTerminalLine(cmd.substring(5), 'output');
+        return;
+      }
+
+      const output = outputs[cmd];
+      if (output) {
+        if (typeof output === 'string') {
+          addTerminalLine(output, 'output');
+        }
+      } else {
+        addTerminalLine(`Command not found: ${cmd}. Try 'help'`, 'error');
+      }
+      addTerminalLine('', 'output');
+    }
+
+    // 更新时间
+    setInterval(() => {
+      document.getElementById('terminalTime').textContent = new Date().toLocaleTimeString();
+    }, 1000);
+  </script>
+</body>
+</html>

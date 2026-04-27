@@ -203,6 +203,7 @@
     .info-item .label { color: #64748b; }
     .info-item .value { color: #e2e8f0; font-family: monospace; }
   </style>
+  <script src="error-handler.js"></script>
 </head>
 <body>
   <h1>无线投屏 - 发送端</h1>
@@ -238,6 +239,19 @@
       </div>
     </div>
 
+    <!-- 设备发现 -->
+    <div class="card">
+      <h3>可用设备</h3>
+      <div id="deviceList" style="min-height: 60px;">
+        <div style="color: #94a3b8; text-align: center; padding: 1rem;">
+          正在搜索设备...
+        </div>
+      </div>
+      <div class="controls" style="margin-top: 0.5rem;">
+        <button class="btn" onclick="discoverDevices()" style="padding: 0.5rem 1rem; font-size: 0.9rem;">🔄 刷新设备</button>
+      </div>
+    </div>
+
     <!-- 设置 -->
     <div class="card">
       <h3>投屏设置</h3>
@@ -270,6 +284,7 @@
     let localStream = null;
     let sessionId = null;
     let whepResourceUrl = null;
+    let discoverIntervalId = null;
 
     function log(cls, msg) {
       const area = document.getElementById('logArea');
@@ -294,11 +309,82 @@
       const base = getBaseUrl();
       const url = new URL(base);
       const wsProto = url.protocol === 'https:' ? 'wss:' : 'ws:';
-      // WebSocket 服务器在 8081 端口
-      const wsPort = url.port || (url.protocol === 'https:' ? '443' : '80');
-      const wsHost = url.hostname + ':8081';
-      return `${wsProto}//${wsHost}`;
+      // WebSocket 与 HTTP 共用同一端口
+      return `${wsProto}//${url.host}/ws`;
     }
+
+    // ========================================
+    // 设备发现功能
+    // ========================================
+    let discoveredDevices = [];
+    let selectedDevice = null;
+
+    async function discoverDevices() {
+      try {
+        log('info', '正在搜索投屏设备...');
+        const baseUrl = window.location.origin;
+        const response = await fetch(`${baseUrl}/api/discover`);
+        const data = await response.json();
+
+        if (data.devices && data.devices.length > 0) {
+          discoveredDevices = data.devices;
+          renderDeviceList(data.devices);
+          log('ok', `发现 ${data.devices.length} 个设备`);
+        } else {
+          renderDeviceList([]);
+          log('info', '未发现设备，请检查网络或手动输入地址');
+        }
+      } catch (e) {
+        log('err', '设备搜索失败: ' + e.message);
+        renderDeviceList([]);
+      }
+    }
+
+    function renderDeviceList(devices) {
+      const container = document.getElementById('deviceList');
+
+      if (devices.length === 0) {
+        container.innerHTML = `
+          <div style="color: #94a3b8; text-align: center; padding: 1rem;">
+            未发现设备
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = devices.map((device, index) => `
+        <div class="device-item ${selectedDevice === device.url ? 'selected' : ''}"
+             style="padding: 0.8rem; margin-bottom: 0.5rem; border-radius: 8px;
+                    border: 1px solid ${selectedDevice === device.url ? '#3b82f6' : 'rgba(255,255,255,0.1)'};
+                    background: ${selectedDevice === device.url ? 'rgba(59,130,246,0.1)' : 'rgba(255,255,255,0.05)'};
+                    cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+                    transition: all 0.2s;"
+             onclick="selectDevice(${index})">
+          <div>
+            <div style="font-weight: 500; color: #e2e8f0;">${device.name || '未知设备'}</div>
+            <div style="font-size: 0.85rem; color: #64748b;">${device.host}:${device.port}</div>
+          </div>
+          <div class="status-dot ${selectedDevice === device.url ? 'active' : ''}"
+               style="width: 8px; height: 8px; border-radius: 50%; background: #22c55e;"></div>
+        </div>
+      `).join('');
+    }
+
+    function selectDevice(index) {
+      const device = discoveredDevices[index];
+      if (device) {
+        selectedDevice = device.url;
+        document.getElementById('serverAddr').value = device.url;
+        renderDeviceList(discoveredDevices);
+        log('info', `已选择设备: ${device.name} (${device.host})`);
+      }
+    }
+
+    // 页面加载时自动搜索设备
+    window.addEventListener('DOMContentLoaded', () => {
+      discoverDevices();
+      discoverIntervalId = setInterval(discoverDevices, 30000);
+    });
 
     async function startCast() {
       try {
@@ -307,7 +393,7 @@
 
         const audio = document.getElementById('chkAudio').checked;
         localStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always', displaySurface: 'monitor' },
+          video: { cursor: 'always' },
           audio: audio,
         });
 
@@ -323,7 +409,12 @@
         document.getElementById('resInfo').textContent =
           `${settings.width || '?'}x${settings.height || '?'} @ ${settings.frameRate || '?'}fps`;
 
-        log('ok', `屏幕捕获: ${settings.width}x${settings.height}`);
+        const audioTracks = localStream.getAudioTracks();
+        if (audioTracks.length > 0) {
+          log('ok', `屏幕捕获: ${settings.width}x${settings.height} + 音频`);
+        } else {
+          log('ok', `屏幕捕获: ${settings.width}x${settings.height} (无音频)`);
+        }
 
         const mode = document.getElementById('signalingMode').value;
         if (mode === 'whep') {
@@ -332,8 +423,17 @@
           await connectWS();
         }
       } catch (e) {
-        setStatus('error', '启动失败: ' + e.message);
-        log('err', e.message);
+        // 清理：连接失败时停止 MediaStream
+        if (localStream) {
+          localStream.getTracks().forEach(t => t.stop());
+          localStream = null;
+        }
+        if (window.errorHandler) {
+          window.errorHandler.handleError(e, '获取屏幕时出错');
+        } else {
+          setStatus('error', '启动失败: ' + e.message);
+          log('err', e.message);
+        }
       }
     }
 
@@ -344,6 +444,20 @@
       log('info', '使用 WHEP 信令模式');
 
       pc = createPeerConnection();
+
+      // ICE candidate handler 必须在 setLocalDescription 之前设置
+      pc.onicecandidate = async (event) => {
+        if (!event.candidate || !whepResourceUrl) return;
+        try {
+          await fetch(whepResourceUrl, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ candidates: [event.candidate.toJSON()] }),
+          });
+        } catch (e) {
+          log('warn', 'ICE 候选发送失败: ' + e.message);
+        }
+      };
 
       // 添加轨道
       localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
@@ -382,97 +496,137 @@
         return;
       }
 
-      // Trickle ICE
-      pc.onicecandidate = async (event) => {
-        if (!event.candidate || !whepResourceUrl) return;
-        try {
-          await fetch(whepResourceUrl, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ candidates: [event.candidate.toJSON()] }),
-          });
-        } catch (e) {
-          log('warn', 'ICE 候选发送失败: ' + e.message);
-        }
-      };
-
       document.getElementById('btnStart').style.display = 'none';
       document.getElementById('btnStop').style.display = 'inline-block';
     }
 
     // ---- WebSocket 兼容模式 ----
 
+    let wsConnection = null;
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const RECONNECT_DELAY = 2000;
+
+    function cleanupPeerConnection() {
+      if (pc) {
+        pc.close();
+        pc = null;
+      }
+    }
+
     async function connectWS() {
       setStatus('connecting', 'WebSocket 信令协商中...');
       log('info', '使用 WebSocket 信令模式');
 
+      // 重连时先清理旧的 PeerConnection
+      cleanupPeerConnection();
+
       const wsUrl = getWsUrl();
-      let ws;
 
-      await new Promise((resolve, reject) => {
-        ws = new WebSocket(wsUrl);
-        ws.onopen = resolve;
-        ws.onerror = () => reject(new Error('WebSocket 连接失败'));
-      });
+      try {
+        wsConnection = new WebSocket(wsUrl);
 
-      log('ok', 'WebSocket 已连接');
+        await new Promise((resolve, reject) => {
+          wsConnection.onopen = () => {
+            log('ok', 'WebSocket 已连接');
+            reconnectAttempts = 0;
+            resolve();
+          };
+          wsConnection.onerror = () => reject(new Error('WebSocket 连接失败'));
+        });
 
-      pc = createPeerConnection();
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        pc = createPeerConnection();
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
+        // ICE candidate handler 在添加轨道前设置
+        pc.onicecandidate = (event) => {
+          if (!event.candidate) {
+            log('info', 'ICE 候选收集完成');
+            return;
+          }
+          log('info', '发送 ICE 候选: ' + event.candidate.candidate.split(':')[0]);
+          if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
+            wsConnection.send(JSON.stringify({
+              type: 'ice_candidate',
+              session_id: sessionId,
+              candidate: JSON.stringify(event.candidate),
+            }));
+          }
+        };
 
-      sessionId = 'ws_' + Date.now().toString(36);
+        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-      ws.send(JSON.stringify({
-        type: 'offer',
-        session_id: sessionId,
-        sdp: JSON.stringify(offer),
-      }));
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
 
-      document.getElementById('sessionId').textContent = sessionId;
-      document.getElementById('sessionCard').style.display = 'block';
+        sessionId = 'ws_' + Date.now().toString(36);
 
-      pc.onicecandidate = (event) => {
-        if (!event.candidate) {
-          log('info', 'ICE 候选收集完成');
-          return;
-        }
-        log('info', '发送 ICE 候选: ' + event.candidate.candidate.split(':')[0]);
-        ws.send(JSON.stringify({
-          type: 'ice_candidate',
+        wsConnection.send(JSON.stringify({
+          type: 'offer',
           session_id: sessionId,
-          candidate: JSON.stringify(event.candidate),
+          sdp: JSON.stringify(offer),
         }));
-      };
 
-      ws.onmessage = async (event) => {
-        const msg = JSON.parse(event.data);
-        console.log('[WS] 收到消息:', msg.type);
+        document.getElementById('sessionId').textContent = sessionId;
+        document.getElementById('sessionCard').style.display = 'block';
 
-        if (msg.type === 'answer') {
-          log('info', '收到 SDP Answer...');
-          const answer = JSON.parse(msg.sdp);
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          log('ok', 'SDP Answer 已设置, Remote Description: ' + answer.type);
-        } else if (msg.type === 'ice_candidate') {
-          log('info', '收到 ICE 候选');
-          const candidate = JSON.parse(msg.candidate);
-          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        wsConnection.onmessage = async (event) => {
+          const msg = JSON.parse(event.data);
+          console.log('[WS] 收到消息:', msg.type);
+
+          if (msg.type === 'answer') {
+            log('info', '收到 SDP Answer...');
+            const answer = JSON.parse(msg.sdp);
+            await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            log('ok', 'SDP Answer 已设置, Remote Description: ' + answer.type);
+          } else if (msg.type === 'ice_candidate') {
+            log('info', '收到 ICE 候选');
+            const candidate = JSON.parse(msg.candidate);
+            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+          }
+        };
+
+        wsConnection.onclose = () => {
+          log('warn', 'WebSocket 连接关闭');
+          handleReconnect();
+        };
+
+        wsConnection.onerror = (error) => {
+          log('err', 'WebSocket 错误');
+          handleReconnect();
+        };
+
+        document.getElementById('btnStart').style.display = 'none';
+        document.getElementById('btnStop').style.display = 'inline-block';
+
+      } catch (error) {
+        setStatus('error', '连接失败');
+        log('err', error.message);
+        handleReconnect();
+      }
+    }
+
+    function handleReconnect() {
+      if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+        setStatus('error', '重连失败，请手动重试');
+        log('err', '达到最大重连次数');
+        return;
+      }
+
+      reconnectAttempts++;
+      const delay = RECONNECT_DELAY * reconnectAttempts;
+
+      setStatus('connecting', `连接断开，${delay/1000}秒后重连... (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+      log('warn', `${delay/1000}秒后尝试第 ${reconnectAttempts} 次重连...`);
+
+      reconnectTimer = setTimeout(() => {
+        if (localStream && localStream.getTracks().some(t => t.readyState === 'live')) {
+          connectWS();
+        } else {
+          setStatus('error', '屏幕共享已结束，请重新开始');
+          log('err', 'MediaStream 轨道已失效');
         }
-      };
-
-      ws.onerror = (error) => {
-        log('err', 'WebSocket 错误: ' + error);
-      };
-
-      ws.onclose = () => {
-        log('info', 'WebSocket 连接关闭');
-      };
-
-      document.getElementById('btnStart').style.display = 'none';
-      document.getElementById('btnStop').style.display = 'inline-block';
+      }, delay);
     }
 
     // ---- 公共 ----
@@ -488,10 +642,8 @@
       const conn = new RTCPeerConnection(config);
 
       // 跟踪 ICE 收集状态
-      let iceGatheringState = 'new';
       conn.onicegatheringstatechange = () => {
-        iceGatheringState = conn.iceGatheringState;
-        log('info', 'ICE 收集状态: ' + iceGatheringState);
+        log('info', 'ICE 收集状态: ' + conn.iceGatheringState);
       };
 
       conn.onconnectionstatechange = () => {
@@ -518,47 +670,42 @@
       conn.getSenders().forEach(sender => {
         if (sender.track && sender.track.kind === 'video') {
           log('info', '视频轨道已添加: ' + sender.track.label);
-          sender.oncodecchange = () => {
-            const params = sender.getParameters();
-            const codec = params.codecs?.[0];
-            if (codec) {
-              document.getElementById('codecInfo').textContent =
-                `${codec.mimeType.replace('video/', '')} ${codec.clockRate}`;
-              log('ok', '编码器: ' + codec.mimeType);
-            }
-          };
         } else if (sender.track && sender.track.kind === 'audio') {
           log('info', '音频轨道已添加: ' + sender.track.label);
-        }
-      });
-
-      // 检测编码器
-      conn.getSenders().forEach(sender => {
-        if (sender.track && sender.track.kind === 'video') {
-          sender.oncodecchange = () => {
-            const params = sender.getParameters();
-            const codec = params.codecs?.[0];
-            if (codec) {
-              document.getElementById('codecInfo').textContent =
-                `${codec.mimeType.replace('video/', '')} ${codec.clockRate}`;
-              log('info', '编码器: ' + codec.mimeType);
-            }
-          };
         }
       });
 
       return conn;
     }
 
-    function stopCast() {
+    async function stopCast() {
+      // 清除重连定时器
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      reconnectAttempts = 0;
+
+      // WHEP 模式：发送 DELETE 清理服务端会话
+      if (whepResourceUrl) {
+        try {
+          await fetch(whepResourceUrl, { method: 'DELETE' });
+        } catch (e) {
+          // 忽略清理失败
+        }
+      }
+
+      // 关闭 WebSocket
+      if (wsConnection) {
+        wsConnection.close();
+        wsConnection = null;
+      }
+
       if (localStream) {
         localStream.getTracks().forEach(t => t.stop());
         localStream = null;
       }
-      if (pc) {
-        pc.close();
-        pc = null;
-      }
+      cleanupPeerConnection();
 
       document.getElementById('preview').srcObject = null;
       document.getElementById('ph').style.display = 'block';

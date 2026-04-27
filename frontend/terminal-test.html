@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Terminal WebSocket Test</title>
+    <style>
+        body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #00ff00; }
+        #log { border: 1px solid #333; padding: 10px; height: 400px; overflow-y: auto; background: #000; }
+        .btn { padding: 10px 20px; margin: 10px; background: #333; color: #fff; border: none; cursor: pointer; }
+        .btn:hover { background: #555; }
+    </style>
+</head>
+<body>
+    <h1>Terminal WebSocket Test</h1>
+    <button class="btn" onclick="connect()">Connect</button>
+    <button class="btn" onclick="sendTest()">Send Test</button>
+    <button class="btn" onclick="disconnect()">Disconnect</button>
+    <div id="log"></div>
+
+    <script>
+        let ws = null;
+        const log = document.getElementById('log');
+
+        function addLog(msg) {
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+            log.appendChild(line);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function connect() {
+            const wsUrl = `ws://${window.location.hostname}:8080/ws/terminal`;
+            addLog(`Connecting to ${wsUrl}...`);
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                addLog('CONNECTED');
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                addLog(`RECEIVED: ${JSON.stringify(data)}`);
+            };
+
+            ws.onerror = (error) => {
+                addLog('ERROR: ' + error);
+            };
+
+            ws.onclose = () => {
+                addLog('DISCONNECTED');
+            };
+        }
+
+        function sendTest() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const msg = {
+                    type: 'output',
+                    content: 'Hello from browser!',
+                    timestamp: new Date().toISOString()
+                };
+                ws.send(JSON.stringify(msg));
+                addLog(`SENT: ${JSON.stringify(msg)}`);
+            } else {
+                addLog('Not connected!');
+            }
+        }
+
+        function disconnect() {
+            if (ws) {
+                ws.close();
+                ws = null;
+            }
+        }
+    </script>
+</body>
+</html>

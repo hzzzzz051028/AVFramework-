@@ -7,7 +7,13 @@
 import logging
 
 from .hardware import hardware
-from .display import DisplayManager
+
+try:
+    from .display import DisplayManager
+    HAS_DISPLAY = True
+except (ImportError, Exception):
+    HAS_DISPLAY = False
+    logging.getLogger(__name__).warning("DisplayManager 不可用，合成器将使用默认配置")
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +49,7 @@ class CompositorManager:
 
     def __init__(self, config=None):
         self._config = config
-        self._display = DisplayManager(config)
+        self._display = DisplayManager(config) if HAS_DISPLAY else None
         self._compositor = None
         self._pipeline = None
         self._current_layout = "auto"
@@ -105,7 +111,7 @@ class CompositorManager:
         注意: 这个方法只返回 sink/compositor 部分,
         webrtcbin → depay → decode 部分由 receiver.py 负责
         """
-        sink = self._display.build_sink_string()
+        sink = self._display.build_sink_string() if self._display else "autovideosink"
         use_compositor = self.should_use_compositor(stream_count)
 
         if not use_compositor:
@@ -160,7 +166,7 @@ class CompositorManager:
             "layout": self._forced_layout or "auto",
             "active_streams": self._active_count,
             "using_compositor": self.should_use_compositor(self._active_count),
-            "display": self._display.get_mode_info(),
+            "display": self._display.get_mode_info() if self._display else {"mode": "default"},
         }
 
     @property

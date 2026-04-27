@@ -141,7 +141,7 @@ class StreamReceiver:
         def do_set_remote():
             promise = Gst.Promise.new()
             self._webrtcbin.emit("set-remote-description", offer, promise)
-            promise.interrupt()
+            promise.wait()
 
         if self._glib_ctx:
             self._glib_ctx.invoke_full(0, do_set_remote)
@@ -163,11 +163,10 @@ class StreamReceiver:
         if not HAS_GST or not self._webrtcbin:
             return
 
-        ice_candidate = GstWebRTC.WebRTCICECandidate.init(
-            sdp_mid, sdp_mline_index, candidate,
-        )
-        if ice_candidate:
-            self._webrtcbin.emit("add-ice-candidate", sdp_mline_index, ice_candidate)
+        try:
+            self._webrtcbin.emit("add-ice-candidate", sdp_mline_index, candidate)
+        except Exception as e:
+            logger.warning("[%s] 添加 ICE 候选失败: %s", self.session_id, e)
 
     def set_tlp_candidates(self, candidates):
         """WHEP: 批量设置 ICE candidates (from SDP a=candidate lines or link header)"""
@@ -194,6 +193,8 @@ class StreamReceiver:
 
     def stop(self):
         """停止并清理管线"""
+        self._state = "disconnected"
+
         if self._pipeline:
             self._pipeline.set_state(Gst.State.NULL)
             self._pipeline = None
@@ -201,9 +202,11 @@ class StreamReceiver:
 
         if self._loop:
             self._loop.quit()
-            self._loop = None
+        if self._glib_thread and self._glib_thread.is_alive():
+            self._glib_thread.join(timeout=5)
+        self._loop = None
+        self._glib_thread = None
 
-        self._state = "disconnected"
         logger.info("[%s] 管线已停止", self.session_id)
 
     # ---- 内部回调 ----
@@ -261,7 +264,7 @@ class StreamReceiver:
         # 设置本地描述
         set_promise = Gst.Promise.new()
         element.emit("set-local-description", answer, set_promise)
-        set_promise.interrupt()
+        set_promise.wait()
 
         logger.info("[%s] SDP Answer 已生成 (%d bytes)", self.session_id, len(answer.sdp.as_text()))
         self._answer_event.set()

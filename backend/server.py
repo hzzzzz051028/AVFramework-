@@ -20,6 +20,7 @@ from gst.hardware import hardware
 from gst.receiver import StreamReceiverManager, HAS_GST
 from gst.compositor import CompositorManager
 from gst.audio_mixer import AudioManager
+from mdns_service import start_mdns, stop_mdns
 
 # ========================================
 # 日志
@@ -43,16 +44,25 @@ receiver_manager = StreamReceiverManager(config=config)
 compositor = CompositorManager(config=config)
 audio_manager = AudioManager(config=config)
 
+# 终端 WebSocket 连接存储
+terminal_clients = set()
+
+# WS 客户端 → 会话 ID 映射 (用于断连时只清理该客户端的会话)
+ws_sessions = {}  # client_id → set of session_ids
+
 
 def get_local_ip():
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-        s.close()
         return ip
     except Exception:
         return "localhost"
+    finally:
+        if s:
+            s.close()
 
 
 # ========================================
@@ -68,7 +78,11 @@ async def whep_create_session(request):
             status=429,
         )
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
     sdp_offer = body.get("sdp") or body.get("offer")
 
     if not sdp_offer:
@@ -77,34 +91,40 @@ async def whep_create_session(request):
     # 创建接收器
     receiver = await receiver_manager.create_session()
 
-    # 创建 GStreamer 管线
-    receiver.create_pipeline()
+    try:
+        # 创建 GStreamer 管线
+        receiver.create_pipeline()
 
-    # 设置 Offer → 生成 Answer (GLib 循环阻塞, 需要在线程中运行)
-    loop = asyncio.get_event_loop()
-    answer = await loop.run_in_executor(None, receiver.set_offer, sdp_offer)
+        # 设置 Offer → 生成 Answer
+        loop = asyncio.get_running_loop()
+        answer = await loop.run_in_executor(None, receiver.set_offer, sdp_offer)
 
-    # 启动管线
-    receiver.start()
+        # 启动管线
+        receiver.start()
 
-    if not answer:
+        if not answer:
+            await receiver_manager.remove_session(receiver.session_id)
+            return web.json_response(
+                {"error": "failed to process SDP offer"},
+                status=500,
+            )
+
         return web.json_response(
-            {"error": "failed to process SDP offer"},
-            status=500,
+            {
+                "id": receiver.session_id,
+                "sdp": answer,
+                "status": receiver.state,
+            },
+            status=201,
+            headers={
+                "Location": f"/api/sessions/{receiver.session_id}",
+                "ETag": f'"{receiver.session_id}"',
+            },
         )
-
-    return web.json_response(
-        {
-            "id": receiver.session_id,
-            "sdp": answer,
-            "status": receiver.state,
-        },
-        status=201,
-        headers={
-            "Location": f"/api/sessions/{receiver.session_id}",
-            "ETag": f'"{receiver.session_id}"',
-        },
-    )
+    except Exception as e:
+        await receiver_manager.remove_session(receiver.session_id)
+        logger.error("[WHEP] 创建会话失败: %s", e)
+        return web.json_response({"error": str(e)}, status=500)
 
 
 async def whep_patch_session(request):
@@ -115,7 +135,11 @@ async def whep_patch_session(request):
     if not receiver:
         return web.json_response({"error": "session not found"}, status=404)
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+
     candidates = body.get("candidates", [])
 
     for cand in candidates:
@@ -155,7 +179,10 @@ async def api_status(request):
 
 async def api_set_layout(request):
     """PUT /api/display/layout - 切换布局"""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
     layout = body.get("layout", "auto")
     compositor.set_layout(layout)
     return web.json_response({"status": "ok", "layout": layout})
@@ -163,10 +190,40 @@ async def api_set_layout(request):
 
 async def api_set_volume(request):
     """PUT /api/audio/master - 主音量"""
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
     volume = body.get("volume", audio_manager.master_volume)
     audio_manager.set_volume(volume)
     return web.json_response({"status": "ok", "volume": audio_manager.master_volume})
+
+
+async def api_discover_devices(request):
+    """GET /api/discover - 发现局域网内的投屏设备（mDNS）"""
+    try:
+        from mdns_service import MDNSDiscovery
+        discovery = MDNSDiscovery()
+        devices = await discovery.discover(timeout=2.0)
+
+        # 转换为列表格式
+        device_list = [
+            {
+                "id": name,
+                "name": info["name"],
+                "host": info["host"],
+                "port": info["port"],
+                "url": f"http://{info['host']}:{info['port']}",
+                "properties": info.get("properties", {})
+            }
+            for name, info in devices.items()
+        ]
+
+        return web.json_response({"devices": device_list})
+    except ImportError:
+        return web.json_response({"devices": [], "error": "mDNS not available"})
+    except Exception as e:
+        return web.json_response({"devices": [], "error": str(e)})
 
 
 async def health_check(request):
@@ -217,7 +274,7 @@ async def ws_handler(request):
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error("[WS] 错误: %s", ws.exception())
     finally:
-        await handle_ws_disconnect(ws, client_id)
+        handle_ws_disconnect(ws, client_id)
         logger.info("[WS] 客户端断开: %s", client_id)
 
     return ws
@@ -245,17 +302,20 @@ async def handle_ws_message(ws, client_id, data):
         try:
             receiver = await receiver_manager.create_session(session_id)
             receiver.create_pipeline()
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             answer = await loop.run_in_executor(None, receiver.set_offer, sdp_offer)
             receiver.start()
 
             if answer:
+                # 记录此 session 属于该 WS 客户端
+                ws_sessions.setdefault(client_id, set()).add(session_id)
                 await ws.send_json({
                     "type": "answer",
                     "session_id": session_id,
                     "sdp": answer,
                 })
             else:
+                await receiver_manager.remove_session(session_id)
                 await ws.send_json({"type": "error", "message": "failed to create answer"})
         except ValueError as e:
             await ws.send_json({"type": "error", "message": str(e)})
@@ -283,11 +343,60 @@ async def handle_ws_message(ws, client_id, data):
 
 
 async def handle_ws_disconnect(ws, client_id):
-    """清理断开连接"""
-    # 查找并清理该 ws 相关的会话
-    sessions = receiver_manager.get_status_list()
-    for s in sessions:
-        await receiver_manager.remove_session(s["session_id"])
+    """清理断开连接 - 只移除该客户端的会话"""
+    session_ids = ws_sessions.pop(client_id, set())
+    for sid in session_ids:
+        asyncio.ensure_future(receiver_manager.remove_session(sid))
+
+
+# ========================================
+# 终端 WebSocket (保底方案)
+# ========================================
+async def terminal_ws_handler(request):
+    """终端 WebSocket 端点 - 接收 PC 端转发的终端输出"""
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+
+    client_id = id(ws)
+    peer = request.remote or "unknown"
+    logger.info("[Terminal] 客户端连接: %s from %s", client_id, peer)
+
+    terminal_clients.add(ws)
+
+    try:
+        # 发送欢迎消息
+        await ws.send_json({
+            'type': 'connected',
+            'message': '终端 WebSocket 已连接',
+            'timestamp': datetime.now().isoformat()
+        })
+
+        async for msg in ws:
+            if msg.type == web.WSMsgType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    logger.debug("[Terminal] 收到消息: %s", data.get('type'))
+
+                    # 广播消息到所有其他终端客户端
+                    # (支持多终端同时查看)
+                    for client in terminal_clients:
+                        if client != ws and not client.closed:
+                            try:
+                                await client.send_json(data)
+                            except Exception:
+                                pass
+
+                except json.JSONDecodeError:
+                    await ws.send_json({"type": "error", "message": "invalid json"})
+
+            elif msg.type == web.WSMsgType.ERROR:
+                logger.error("[Terminal] 错误: %s", ws.exception())
+
+    finally:
+        terminal_clients.discard(ws)
+        logger.info("[Terminal] 客户端断开: %s", client_id)
+
+    return ws
 
 
 # ========================================
@@ -313,6 +422,38 @@ async def dashboard_handler(request):
     return web.Response(text="Dashboard not found", status=404)
 
 
+async def terminal_view_handler(request):
+    """终端显示界面"""
+    term_path = FRONTEND_DIR / "terminal-view.html"
+    if term_path.exists():
+        return web.FileResponse(term_path)
+    return web.Response(text="Terminal view not found", status=404)
+
+
+async def view_handler(request):
+    """观看端界面"""
+    view_path = FRONTEND_DIR / "view.html"
+    if view_path.exists():
+        return web.FileResponse(view_path)
+    return web.Response(text="View page not found", status=404)
+
+
+async def sender_html_handler(request):
+    """发送端界面 (直接访问 sender.html)"""
+    sender_path = FRONTEND_DIR / "sender.html"
+    if sender_path.exists():
+        return web.FileResponse(sender_path)
+    return web.Response(text="Sender page not found", status=404)
+
+
+async def dashboard_html_handler(request):
+    """控制面板界面 (直接访问 dashboard.html)"""
+    dash_path = FRONTEND_DIR / "dashboard.html"
+    if dash_path.exists():
+        return web.FileResponse(dash_path)
+    return web.Response(text="Dashboard page not found", status=404)
+
+
 # ========================================
 # 应用工厂
 # ========================================
@@ -335,6 +476,7 @@ def create_app():
     app.router.add_get("/api/status", api_status)
     app.router.add_put("/api/display/layout", api_set_layout)
     app.router.add_put("/api/audio/master", api_set_volume)
+    app.router.add_get("/api/discover", api_discover_devices)
 
     # 健康检查
     app.router.add_get("/health", health_check)
@@ -342,10 +484,15 @@ def create_app():
 
     # WebSocket
     app.router.add_get("/ws", ws_handler)
+    app.router.add_get("/ws/terminal", terminal_ws_handler)
 
     # 页面
     app.router.add_get("/", index_handler)
     app.router.add_get("/dashboard", dashboard_handler)
+    app.router.add_get("/view.html", view_handler)
+    app.router.add_get("/sender.html", sender_html_handler)
+    app.router.add_get("/dashboard.html", dashboard_html_handler)
+    app.router.add_get("/terminal-view.html", terminal_view_handler)
 
     # 静态文件
     app.router.add_static("/static", FRONTEND_DIR, name="static")
@@ -367,10 +514,23 @@ async def on_startup(app):
 
     logger.info("硬件信息:\n%s", hardware.summary())
 
+    # 启动 mDNS 服务广播
+    logger.info("启动 mDNS 服务广播...")
+    try:
+        start_mdns()
+    except Exception as e:
+        logger.warning(f"[mDNS] 启动失败: {e}")
+
 
 async def on_cleanup(app):
     logger.info("关闭所有会话...")
     await receiver_manager.stop_all()
+
+    # 停止 mDNS 服务
+    try:
+        stop_mdns()
+    except Exception:
+        pass
 
 
 # ========================================
@@ -390,7 +550,7 @@ def main():
     print("[接入方式]")
     print(f"  本机 IP:        {local_ip}")
     print(f"  Web 界面:       http://{local_ip}:{http_port}")
-    print(f"  WebSocket:      ws://{local_ip}:{ws_port}")
+    print(f"  WebSocket:      ws://{local_ip}:{http_port}/ws")
     print(f"  WHEP 端点:      http://{local_ip}:{http_port}/api/sessions")
     print(f"  状态面板:       http://{local_ip}:{http_port}/dashboard")
     print("")

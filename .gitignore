@@ -42,3 +42,10 @@ logs/
 # Environment
 .env
 .env.local
+
+# Python
+__pycache__/
+*.pyc
+
+# Misc
+=12.0

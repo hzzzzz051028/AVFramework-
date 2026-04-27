@@ -46,12 +46,36 @@ class AudioManager:
 
     def get_sink_string(self):
         """构建音频输出 sink 的 GStreamer 元素字符串"""
+        import subprocess
+
         device_param = ""
         if self._output_device and self._output_device != "auto":
             device_param = f" device={self._output_device}"
 
         volume = self._master_volume / 100.0
-        return f"volume volume={volume:.2f} ! pulsesink{device_param}"
+
+        # 自适应选择音频 sink：优先 autoaudiosink，回退到 pulsesink 或 alsasink
+        try:
+            result = subprocess.run(
+                ["gst-inspect-1.0", "autoaudiosink"],
+                capture_output=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return f"volume volume={volume:.2f} ! autoaudiosink{device_param}"
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.run(
+                ["gst-inspect-1.0", "pulsesink"],
+                capture_output=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return f"volume volume={volume:.2f} ! pulsesink{device_param}"
+        except Exception:
+            pass
+
+        return f"volume volume={volume:.2f} ! alsasink{device_param}"
 
     def build_audio_pipeline_suffix(self, stream_count):
         """构建音频管线后缀

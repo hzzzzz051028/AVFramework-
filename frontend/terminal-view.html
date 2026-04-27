@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>终端投屏模式</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Consolas', 'Monaco', monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .header {
+      background: #161b22;
+      border-bottom: 1px solid #30363d;
+      padding: 0.8rem 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .header h1 { font-size: 1.2rem; }
+    .header a {
+      color: #58a6ff;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .container {
+      flex: 1;
+      display: flex;
+      gap: 1rem;
+      padding: 1rem;
+      min-height: 0;
+    }
+    .terminal-container {
+      flex: 1;
+      background: #000;
+      border-radius: 8px;
+      border: 1px solid #30363d;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .terminal-header {
+      background: #21262d;
+      padding: 0.5rem 1rem;
+      border-bottom: 1px solid #30363d;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.85rem;
+    }
+    .terminal-mode {
+      padding: 0.3rem 0.8rem;
+      border-radius: 4px;
+      background: #238636;
+      color: #fff;
+      font-size: 0.75rem;
+    }
+    .terminal-mode.fallback {
+      background: #da3633;
+    }
+    #terminal {
+      flex: 1;
+      padding: 1rem;
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      font-size: 14px;
+      line-height: 1.6;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+    }
+    .line { margin-bottom: 2px; }
+    .prompt { color: #58a6ff; }
+    .command { color: #c9d1d9; }
+    .output { color: #8b949e; }
+    .error { color: #ff7b72; }
+    .success { color: #3fb950; }
+    .timestamp {
+      color: #484f58;
+      font-size: 12px;
+      margin-right: 0.5rem;
+    }
+    .info-panel {
+      width: 300px;
+      background: #161b22;
+      border-radius: 8px;
+      border: 1px solid #30363d;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .info-panel h3 {
+      font-size: 0.9rem;
+      color: #8b949e;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .stat-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.4rem 0;
+      border-bottom: 1px solid #21262d;
+      font-size: 0.85rem;
+    }
+    .stat-label { color: #8b949e; }
+    .stat-value { color: #c9d1d9; font-family: monospace; }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #3fb950;
+      display: inline-block;
+    }
+    .status-dot.error { background: #da3633; }
+    .status-dot.warning { background: #d29922; }
+    .controls {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .btn {
+      padding: 0.5rem 1rem;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      background: #21262d;
+      color: #c9d1d9;
+      cursor: pointer;
+      font-size: 0.85rem;
+      transition: all 0.2s;
+    }
+    .btn:hover { background: #30363d; }
+    .btn-primary {
+      background: #238636;
+      border-color: #238636;
+    }
+    .btn-primary:hover { background: #2ea043; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🖥️ 终端投屏模式</h1>
+    <a href="/">← 返回主页</a>
+  </div>
+
+  <div class="container">
+    <div class="terminal-container">
+      <div class="terminal-header">
+        <div>
+          <span class="terminal-mode" id="modeBadge">视频模式</span>
+          <span style="margin-left: 1rem; color: #8b949e;" id="sourceInfo">等待连接...</span>
+        </div>
+        <div>
+          <span class="status-dot" id="statusDot"></span>
+          <span id="statusText" style="margin-left: 0.5rem;">就绪</span>
+        </div>
+      </div>
+      <div id="terminal">
+        <div class="line"><span class="output">等待终端连接...</span></div>
+        <div class="line"><span class="output">请选择投屏模式：</span></div>
+        <div class="line"><span class="output">  1. 视频投屏 - 共享整个屏幕或窗口</span></div>
+        <div class="line"><span class="output">  2. 终端投屏 - 共享终端窗口 (保底方案)</span></div>
+        <div class="line"></div>
+      </div>
+    </div>
+
+    <div class="info-panel">
+      <div>
+        <h3>连接状态</h3>
+        <div class="stat-row">
+          <span class="stat-label">模式</span>
+          <span class="stat-value" id="modeValue">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">来源</span>
+          <span class="stat-value" id="sourceValue">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">分辨率</span>
+          <span class="stat-value" id="resValue">-</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">帧率</span>
+          <span class="stat-value" id="fpsValue">-</span>
+        </div>
+      </div>
+
+      <div>
+        <h3>终端统计</h3>
+        <div class="stat-row">
+          <span class="stat-label">行数</span>
+          <span class="stat-value" id="lineCount">0</span>
+        </div>
+        <div class="stat-row">
+          <span class="stat-label">更新</span>
+          <span class="stat-value" id="lastUpdate">-</span>
+        </div>
+      </div>
+
+      <div class="controls">
+        <h3>操作</h3>
+        <button class="btn btn-primary" onclick="startScreenShare()">视频投屏</button>
+        <button class="btn" onclick="switchToFallback()">切换到终端</button>
+        <button class="btn" onclick="clearTerminal()">清空终端</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const terminal = document.getElementById('terminal');
+    const modeBadge = document.getElementById('modeBadge');
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    let lineCount = 0;
+    let isFallbackMode = false;
+
+    // 模拟终端输出 (实际应该通过 WebSocket 从 PC 接收)
+    function addTerminalLine(content, type = 'output') {
+      const line = document.createElement('div');
+      line.className = 'line';
+
+      const timestamp = new Date().toLocaleTimeString();
+      const timeSpan = document.createElement('span');
+      timeSpan.className = 'timestamp';
+      timeSpan.textContent = `[${timestamp}]`;
+
+      const contentSpan = document.createElement('span');
+      contentSpan.className = type;
+      contentSpan.textContent = content;
+
+      line.appendChild(timeSpan);
+      line.appendChild(contentSpan);
+      terminal.appendChild(line);
+
+      lineCount++;
+      document.getElementById('lineCount').textContent = lineCount;
+      document.getElementById('lastUpdate').textContent = timestamp;
+
+      // 自动滚动
+      terminal.scrollTop = terminal.scrollHeight;
+
+      // 限制行数
+      while (terminal.children.length > 1000) {
+        terminal.removeChild(terminal.firstChild);
+      }
+    }
+
+    function clearTerminal() {
+      terminal.innerHTML = '';
+      lineCount = 0;
+      document.getElementById('lineCount').textContent = '0';
+    }
+
+    function setStatus(status, text) {
+      statusDot.className = 'status-dot';
+      if (status === 'ok') statusDot.classList.add('status-dot');
+      else if (status === 'error') statusDot.classList.add('error');
+      else if (status === 'warning') statusDot.classList.add('warning');
+
+      statusText.textContent = text;
+    }
+
+    function startScreenShare() {
+      // 跳转到主页面开始屏幕共享
+      window.location.href = '/?mode=share';
+    }
+
+    function switchToFallback() {
+      isFallbackMode = true;
+      modeBadge.textContent = '终端模式 (保底)';
+      modeBadge.classList.add('fallback');
+      document.getElementById('modeValue').textContent = '终端';
+
+      // 提示用户共享终端窗口
+      addTerminalLine('========================================', 'output');
+      addTerminalLine('切换到终端模式', 'success');
+      addTerminalLine('========================================', 'output');
+      addTerminalLine('', 'output');
+      addTerminalLine('请按以下步骤操作：', 'output');
+      addTerminalLine('1. 在电脑上打开终端 (PowerShell/CMD/Terminal)', 'output');
+      addTerminalLine('2. 点击"开始投屏"', 'output');
+      addTerminalLine('3. 选择"窗口"标签', 'output');
+      addTerminalLine('4. 选择终端窗口', 'output');
+      addTerminalLine('', 'output');
+
+      setStatus('warning', '等待共享终端窗口...');
+    }
+
+    // 连接终端 WebSocket
+    function connectTerminalWebSocket() {
+      const wsUrl = `ws://${window.location.hostname}:8080/ws/terminal`;
+      console.log('Connecting to:', wsUrl);
+
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = () => {
+        setStatus('ok', '终端已连接');
+        addTerminalLine('终端连接成功', 'success');
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'output') {
+          addTerminalLine(data.content, 'output');
+        } else if (data.type === 'command') {
+          addTerminalLine(data.content, 'command');
+        } else if (data.type === 'error') {
+          addTerminalLine(data.content, 'error');
+        }
+      };
+
+      ws.onerror = () => {
+        setStatus('error', '终端连接失败');
+      };
+
+      ws.onclose = () => {
+        setStatus('warning', '终端断开');
+        addTerminalLine('终端连接断开', 'error');
+      };
+    }
+
+    // 初始化
+    window.addEventListener('DOMContentLoaded', () => {
+      clearTerminal();
+      addTerminalLine('系统就绪', 'success');
+      addTerminalLine('正在连接终端 WebSocket...', 'output');
+      connectTerminalWebSocket();
+    });
+  </script>
+</body>
+</html>

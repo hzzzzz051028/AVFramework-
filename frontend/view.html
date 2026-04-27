@@ -71,19 +71,33 @@
   <video id="video" autoplay playsinline muted></video>
 
   <script>
-    // 动态获取 WebSocket URL
+    // WebSocket 与 HTTP 共用端口
     const wsHost = window.location.hostname || 'localhost';
-    const WS_URL = `ws://${wsHost}:8081`;
+    const wsPort = window.location.port || '8080';
+    const WS_URL = `ws://${wsHost}:${wsPort}/ws`;
     let ws = null;
     let pc = null;
     let sessionId = null;
+    let reconnectTimer = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT = 3;
 
     function setStatus(msg) {
       document.getElementById('status').textContent = msg;
     }
 
+    function tryReconnect() {
+      if (reconnectAttempts >= MAX_RECONNECT || !sessionId) return;
+      reconnectAttempts++;
+      const delay = 2000 * reconnectAttempts;
+      setStatus(`连接断开，${delay/1000}秒后重连... (${reconnectAttempts}/${MAX_RECONNECT})`);
+      reconnectTimer = setTimeout(() => join(), delay);
+    }
+
     async function join() {
-      sessionId = document.getElementById('sessionId').value.trim();
+      if (!sessionId) {
+        sessionId = document.getElementById('sessionId').value.trim();
+      }
       if (!sessionId) {
         alert('请输入会话 ID');
         return;
@@ -97,6 +111,7 @@
         ws.onopen = () => {
           console.log('[WS] WebSocket 已连接');
           setStatus('已连接服务器，加入会话...');
+          reconnectAttempts = 0;
           ws.send(JSON.stringify({
             type: 'join_session',
             session_id: sessionId
@@ -104,32 +119,33 @@
         };
 
         ws.onmessage = async (event) => {
-          const data = JSON.parse(event.data);
-          console.log('[WS] 收到消息:', data.type);
+          try {
+            const data = JSON.parse(event.data);
+            console.log('[WS] 收到消息:', data.type);
 
-          if (data.type === 'offer') {
-            console.log('[WS] 收到 Offer，开始处理...');
-            await handleOffer(data.sdp);
-          } else if (data.type === 'ice_candidate') {
-            console.log('[WS] 收到 ICE 候选');
-            await handleIce(data.candidate);
-          } else if (data.type === 'error') {
-            console.error('[WS] 错误:', data.message);
-            setStatus('错误: ' + data.message);
-          } else if (data.type === 'session_ended') {
-            console.warn('[WS] 会话已结束');
-            setStatus('会话已结束');
+            if (data.type === 'offer') {
+              await handleOffer(data.sdp);
+            } else if (data.type === 'ice_candidate') {
+              await handleIce(data.candidate);
+            } else if (data.type === 'error') {
+              console.error('[WS] 错误:', data.message);
+              setStatus('错误: ' + data.message);
+            } else if (data.type === 'session_ended') {
+              setStatus('会话已结束');
+            }
+          } catch (e) {
+            console.error('[WS] 消息处理失败:', e);
           }
         };
 
-        ws.onerror = (error) => {
-          console.error('[WS] WebSocket 错误:', error);
+        ws.onerror = () => {
           setStatus('连接失败');
         };
 
         ws.onclose = () => {
           console.log('[WS] WebSocket 连接关闭');
           setStatus('连接已断开');
+          tryReconnect();
         };
 
       } catch (error) {
@@ -147,38 +163,32 @@
       };
       pc = new RTCPeerConnection(config);
 
-      // ICE 收集状态
       pc.onicegatheringstatechange = () => {
         console.log('[PC] ICE 收集状态:', pc.iceGatheringState);
       };
 
       pc.onicecandidate = (event) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
         if (event.candidate) {
-          console.log('[PC] 发送 ICE 候选:', event.candidate.candidate.split(':')[0]);
           ws.send(JSON.stringify({
             type: 'ice_candidate',
             session_id: sessionId,
             candidate: JSON.stringify(event.candidate)
           }));
-        } else {
-          console.log('[PC] ICE 候选收集完成');
         }
       };
 
       pc.ontrack = (event) => {
-        console.log('[PC] 收到远程轨道:', event.track.kind, '标签:', event.track.label);
-        console.log('[PC] 流数量:', event.streams.length);
+        console.log('[PC] 收到远程轨道:', event.track.kind);
 
         const video = document.getElementById('video');
-        video.srcObject = event.streams[0];
+        const stream = event.streams[0] || new MediaStream([event.track]);
+        video.srcObject = stream;
         video.style.display = 'block';
 
-        // 尝试播放
         video.play().then(() => {
-          console.log('[Video] 播放成功');
           setStatus('已连接 - 视频播放中');
         }).catch(err => {
-          console.error('[Video] 播放失败:', err);
           setStatus('错误: 视频播放失败 - ' + err.message);
         });
 
@@ -186,11 +196,10 @@
       };
 
       pc.onconnectionstatechange = () => {
-        console.log('[PC] 连接状态:', pc.connectionState);
         if (pc.connectionState === 'connected') {
           console.log('[PC] WebRTC 连接成功!');
         } else if (pc.connectionState === 'failed') {
-          console.error('[PC] WebRTC 连接失败');
+          setStatus('连接失败');
         }
       };
 
@@ -200,37 +209,46 @@
     }
 
     async function handleOffer(offerStr) {
-      console.log('[Offer] 处理 SDP Offer...');
-      if (!pc) createPeerConnection();
+      try {
+        if (!pc) createPeerConnection();
 
-      const offer = JSON.parse(offerStr);
-      console.log('[Offer] Offer 类型:', offer.type);
-      console.log('[Offer] 媒体数量:', (offer.sdp || '').split('m=').length - 1);
+        const offer = JSON.parse(offerStr);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
 
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      console.log('[Offer] Remote Description 已设置');
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
 
-      const answer = await pc.createAnswer();
-      console.log('[Offer] Answer 已创建');
-
-      await pc.setLocalDescription(answer);
-      console.log('[Offer] Local Description 已设置');
-
-      ws.send(JSON.stringify({
-        type: 'answer',
-        session_id: sessionId,
-        sdp: JSON.stringify(answer)
-      }));
-      console.log('[Offer] Answer 已发送');
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: 'answer',
+            session_id: sessionId,
+            sdp: JSON.stringify(answer)
+          }));
+        }
+      } catch (e) {
+        console.error('[Offer] 处理失败:', e);
+        setStatus('SDP 协商失败: ' + e.message);
+      }
     }
 
     async function handleIce(candidateStr) {
       if (!pc) return;
-      const candidate = JSON.parse(candidateStr);
-      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      try {
+        const candidate = JSON.parse(candidateStr);
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.warn('[ICE] 添加候选失败:', e);
+      }
     }
 
     function disconnect() {
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+      }
+      reconnectAttempts = MAX_RECONNECT; // 阻止自动重连
+      sessionId = null;
+
       if (pc) {
         pc.close();
         pc = null;
@@ -239,7 +257,10 @@
         ws.close();
         ws = null;
       }
-      document.getElementById('video').style.display = 'none';
+
+      const video = document.getElementById('video');
+      video.srcObject = null;
+      video.style.display = 'none';
       document.getElementById('disconnectBtn').style.display = 'none';
       setStatus('已断开');
     }

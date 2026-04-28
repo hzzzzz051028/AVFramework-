@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # ========================================
 # 路径
 # ========================================
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 # ========================================
 # 全局实例
@@ -49,6 +49,77 @@ terminal_clients = set()
 
 # WS 客户端 → 会话 ID 映射 (用于断连时只清理该客户端的会话)
 ws_sessions = {}  # client_id → set of session_ids
+
+
+# ========================================
+# 信令房间 (Room-based signaling)
+# ========================================
+class Room:
+    def __init__(self, room_id):
+        self.room_id = room_id
+        self.sender = None          # sender 的 client_id (int)
+        self.sender_fmt = "short"
+        self.viewers = {}           # client_id → fmt
+        self.pending_offer = {}     # fmt → msg dict
+        self.pending_ice = []       # [{fmt: msg}, ...]
+
+    def is_sender(self, client_id):
+        return self.sender == client_id
+
+
+rooms = {}              # room_id → Room
+ws_to_client = {}       # id(ws) → client_id
+client_to_ws = {}       # client_id → ws
+client_to_room = {}     # client_id → room_id
+_next_client_id = [0]
+
+
+def _alloc_client_id():
+    _next_client_id[0] += 1
+    return _next_client_id[0]
+
+
+def _get_client_id(ws):
+    """通过 ws 对象获取 client_id"""
+    return ws_to_client.get(id(ws))
+
+
+def _get_ws(client_id):
+    """通过 client_id 获取 ws 对象"""
+    ws = client_to_ws.get(client_id)
+    if ws is not None and ws.closed:
+        return None
+    return ws
+
+
+def _register_ws(ws):
+    """为新连接分配 client_id 并注册映射"""
+    cid = _alloc_client_id()
+    ws_to_client[id(ws)] = cid
+    client_to_ws[cid] = ws
+    return cid
+
+
+def _unregister_ws(ws):
+    """移除连接的所有映射"""
+    ws_id = id(ws)
+    cid = ws_to_client.pop(ws_id, None)
+    if cid is not None:
+        client_to_ws.pop(cid, None)
+        client_to_room.pop(cid, None)
+    return cid
+
+
+async def _send_to(client_id, msg):
+    """安全地向指定 client 发送消息"""
+    ws = _get_ws(client_id)
+    if ws is not None:
+        try:
+            await ws.send_json(msg)
+            return True
+        except Exception:
+            return False
+    return False
 
 
 def get_local_ip():
@@ -259,44 +330,79 @@ async def ws_handler(request):
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
-    client_id = id(ws)
+    cid = _register_ws(ws)
     peer = request.remote or "unknown"
-    logger.info("[WS] 客户端连接: %s from %s", client_id, peer)
+    print(f"[WS] 连接: cid={cid} from {peer}", flush=True)
+    logger.info("[WS] 客户端连接: cid=%s from %s", cid, peer)
 
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    await handle_ws_message(ws, client_id, data)
+                    await handle_ws_message(cid, data)
                 except json.JSONDecodeError:
                     await ws.send_json({"type": "error", "message": "invalid json"})
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error("[WS] 错误: %s", ws.exception())
     finally:
-        handle_ws_disconnect(ws, client_id)
-        logger.info("[WS] 客户端断开: %s", client_id)
+        handle_ws_disconnect(ws, cid)
+        logger.info("[WS] 客户端断开: cid=%s", cid)
 
     return ws
 
 
-async def handle_ws_message(ws, client_id, data):
-    """处理 WebSocket 消息"""
-    msg_type = data.get("type")
+def _detect_format(data):
+    """检测消息格式: 'short' (t/s/c/m/l keys) 或 'long' (type/session_id/candidate keys)"""
+    if "t" in data and "type" not in data:
+        return "short"
+    return "long"
+
+
+def _make_short(t, sid, **kw):
+    msg = {"t": t, "s": sid}
+    msg.update(kw)
+    return msg
+
+
+def _make_long(t, sid, **kw):
+    msg = {"type": t, "session_id": sid}
+    msg.update(kw)
+    return msg
+
+
+def _msg_for(fmt, t_short, t_long, sid, **kw):
+    if fmt == "short":
+        return _make_short(t_short, sid, **kw)
+    return _make_long(t_long, sid, **kw)
+
+
+async def handle_ws_message(cid, data):
+    """处理 WebSocket 消息 - 同时支持 long 和 short 两种消息格式"""
+    fmt = _detect_format(data)
+    if fmt == "short":
+        msg_type = data.get("t")
+        sid_key = "s"
+    else:
+        msg_type = data.get("type")
+        sid_key = "session_id"
+
+    sid = data.get(sid_key, data.get("session_id", ""))
+    print(f"[WS] cid={cid} msg={msg_type} fmt={fmt} sid={sid}", flush=True)
 
     if msg_type == "ping":
-        await ws.send_json({"type": "pong"})
+        await _send_to(cid, {"type": "pong"})
         return
 
-    # WHEP over WebSocket (兼容模式)
-    if msg_type == "offer":
+    # WHEP over WebSocket (兼容模式) - 仅 long format
+    if fmt == "long" and msg_type == "offer":
         session_id = data.get("session_id")
         if not session_id:
             session_id = f"ws_{int(time.time() * 1000) % 1000000}"
 
         sdp_offer = data.get("sdp") or data.get("offer")
         if not sdp_offer:
-            await ws.send_json({"type": "error", "message": "missing sdp"})
+            await _send_to(cid, {"type": "error", "message": "missing sdp"})
             return
 
         try:
@@ -307,21 +413,16 @@ async def handle_ws_message(ws, client_id, data):
             receiver.start()
 
             if answer:
-                # 记录此 session 属于该 WS 客户端
-                ws_sessions.setdefault(client_id, set()).add(session_id)
-                await ws.send_json({
-                    "type": "answer",
-                    "session_id": session_id,
-                    "sdp": answer,
-                })
+                ws_sessions.setdefault(cid, set()).add(session_id)
+                await _send_to(cid, {"type": "answer", "session_id": session_id, "sdp": answer})
             else:
                 await receiver_manager.remove_session(session_id)
-                await ws.send_json({"type": "error", "message": "failed to create answer"})
+                await _send_to(cid, {"type": "error", "message": "failed to create answer"})
         except ValueError as e:
-            await ws.send_json({"type": "error", "message": str(e)})
+            await _send_to(cid, {"type": "error", "message": str(e)})
         return
 
-    if msg_type == "ice_candidate":
+    if fmt == "long" and msg_type == "ice_candidate":
         session_id = data.get("session_id")
         if session_id:
             receiver = await receiver_manager.get_session(session_id)
@@ -336,17 +437,133 @@ async def handle_ws_message(ws, client_id, data):
     if msg_type == "set_layout":
         layout = data.get("layout", "auto")
         compositor.set_layout(layout)
-        await ws.send_json({"type": "layout_changed", "layout": layout})
+        await _send_to(cid, {"type": "layout_changed", "layout": layout})
+        return
+
+    # ---- 信令房间 (P2P sender ↔ viewer) ----
+    if not sid:
+        await _send_to(cid, _msg_for(fmt, "error", "error", "", msg="missing room_id"))
+        return
+
+    room = rooms.get(sid)
+
+    # viewer 注册
+    if msg_type in ("register_viewer", "reg"):
+        if room is None or room.sender is None:
+            await _send_to(cid, _msg_for(fmt, "error", "error", sid, msg="room not found or no sender"))
+            return
+        room.viewers[cid] = fmt
+        client_to_room[cid] = sid
+        # 通知 sender 有新 viewer，让 sender 创建全新的 offer (解决重连黑屏)
+        await _send_to(room.sender, _make_short("new_viewer", sid))
+        print(f"[ROOM] viewer 加入: room={sid} cid={cid} viewers={len(room.viewers)}", flush=True)
+        return
+
+    # sender 发送 offer
+    if msg_type in ("relay_offer", "offer") and fmt == "short":
+        if room is None:
+            room = Room(sid)
+            rooms[sid] = room
+        room.sender = cid
+        room.sender_fmt = fmt
+        client_to_room[cid] = sid
+        sdp = data.get("sdp", "")
+        offer_msgs = {
+            "short": _make_short("offer", sid, sdp=sdp),
+            "long": _make_long("offer", sid, sdp=sdp),
+        }
+        room.pending_offer = offer_msgs
+        room.pending_ice = []
+        # 转发给所有在线 viewer
+        for vcid, vfmt in list(room.viewers.items()):
+            msg = offer_msgs.get(vfmt)
+            if msg and await _send_to(vcid, msg):
+                for ice_pair in room.pending_ice:
+                    imsg = ice_pair.get(vfmt)
+                    if imsg:
+                        await _send_to(vcid, imsg)
+        print(f"[ROOM] offer: room={sid} cid={cid} viewers={len(room.viewers)} sdp_len={len(sdp)}", flush=True)
+        return
+
+    # viewer 发送 answer
+    if msg_type in ("relay_answer", "answer"):
+        if room is None or room.sender is None:
+            return
+        sdp = data.get("sdp", "")
+        answer_msg = _msg_for(room.sender_fmt, "answer", "answer", sid, sdp=sdp)
+        await _send_to(room.sender, answer_msg)
+        print(f"[ROOM] answer: room={sid} → sender={room.sender} sdp_len={len(sdp)}", flush=True)
+        return
+
+    # ICE candidate 中继
+    if msg_type in ("relay_ice", "ice"):
+        if room is None:
+            return
+        c = data.get("candidate", "") or data.get("c", "")
+        m = data.get("sdpMid", "0") or data.get("m", "0")
+        l = data.get("sdpMLineIndex", 0) or data.get("l", 0)
+        ice_msgs = {
+            "short": _make_short("ice", sid, c=c, m=m, l=l),
+            "long": _make_long("ice_candidate", sid, candidate=c, sdpMid=m, sdpMLineIndex=l),
+        }
+
+        if room.is_sender(cid):
+            # sender → viewers
+            room.pending_ice.append(ice_msgs)
+            for vcid, vfmt in list(room.viewers.items()):
+                imsg = ice_msgs.get(vfmt)
+                if imsg:
+                    await _send_to(vcid, imsg)
+        else:
+            # viewer → sender
+            imsg = ice_msgs.get(room.sender_fmt)
+            if imsg:
+                await _send_to(room.sender, imsg)
+        return
+
+    # stop / leave
+    if msg_type in ("stop", "leave"):
+        if room and room.is_sender(cid):
+            for vcid, vfmt in list(room.viewers.items()):
+                await _send_to(vcid, _msg_for(vfmt, "stopped", "stopped", sid))
+            room.sender = None
+            room.pending_offer = {}
+            room.pending_ice = []
+            print(f"[ROOM] sender 停止: room={sid}", flush=True)
         return
 
     logger.warning("[WS] 未知消息类型: %s", msg_type)
 
 
-async def handle_ws_disconnect(ws, client_id):
-    """清理断开连接 - 只移除该客户端的会话"""
-    session_ids = ws_sessions.pop(client_id, set())
+def handle_ws_disconnect(ws, cid):
+    """清理断开连接"""
+    # WHEP 会话清理
+    session_ids = ws_sessions.pop(cid, set())
     for sid in session_ids:
         asyncio.ensure_future(receiver_manager.remove_session(sid))
+
+    # Room 清理 - 先查 room_id 再 unregister
+    room_id = client_to_room.get(cid)
+    if room_id:
+        room = rooms.get(room_id)
+        if room is not None:
+            if room.is_sender(cid):
+                for vcid, vfmt in list(room.viewers.items()):
+                    msg = _msg_for(vfmt, "stopped", "stopped", room_id)
+                    asyncio.ensure_future(_send_to(vcid, msg))
+                room.sender = None
+                room.pending_offer = {}
+                room.pending_ice = []
+                print(f"[ROOM] sender 断开: room={room_id}", flush=True)
+                if not room.viewers:
+                    rooms.pop(room_id, None)
+            else:
+                room.viewers.pop(cid, None)
+                print(f"[ROOM] viewer 断开: room={room_id} cid={cid} 剩余={len(room.viewers)}", flush=True)
+                if room.sender is None and not room.viewers:
+                    rooms.pop(room_id, None)
+
+    _unregister_ws(ws)
 
 
 # ========================================
@@ -446,6 +663,22 @@ async def sender_html_handler(request):
     return web.Response(text="Sender page not found", status=404)
 
 
+async def p2p_sender_handler(request):
+    """P2P 投屏端 (minimal)"""
+    path = FRONTEND_DIR / "p2p-sender.html"
+    if path.exists():
+        return web.FileResponse(path)
+    return web.Response(text="P2P sender not found", status=404)
+
+
+async def p2p_view_handler(request):
+    """P2P 观看端 (minimal)"""
+    path = FRONTEND_DIR / "p2p-view.html"
+    if path.exists():
+        return web.FileResponse(path)
+    return web.Response(text="P2P view not found", status=404)
+
+
 async def dashboard_html_handler(request):
     """控制面板界面 (直接访问 dashboard.html)"""
     dash_path = FRONTEND_DIR / "dashboard.html"
@@ -493,6 +726,8 @@ def create_app():
     app.router.add_get("/sender.html", sender_html_handler)
     app.router.add_get("/dashboard.html", dashboard_html_handler)
     app.router.add_get("/terminal-view.html", terminal_view_handler)
+    app.router.add_get("/p2p-sender.html", p2p_sender_handler)
+    app.router.add_get("/p2p-view.html", p2p_view_handler)
 
     # 静态文件
     app.router.add_static("/static", FRONTEND_DIR, name="static")
@@ -571,7 +806,16 @@ def main():
     print("")
 
     app = create_app()
-    web.run_app(app, host=config.server_host, port=http_port, print=None)
+    ssl_ctx = None
+    ssl_crt = Path(__file__).resolve().parent / "cert.pem"
+    ssl_key = Path(__file__).resolve().parent / "key.pem"
+    if ssl_crt.exists() and ssl_key.exists():
+        import ssl
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(str(ssl_crt), str(ssl_key))
+        print("[SSL] HTTPS 已启用")
+        print("")
+    web.run_app(app, host=config.server_host, port=http_port, ssl_context=ssl_ctx, print=None)
 
 
 if __name__ == "__main__":

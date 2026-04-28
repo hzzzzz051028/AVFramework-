@@ -114,37 +114,38 @@ class MDNSDiscovery:
         return discovered
 
 
-class DiscoveryListener:
-    """服务发现监听器"""
+if HAS_ZEROCONF:
+    class DiscoveryListener:
+        """服务发现监听器"""
 
-    def __init__(self, services_dict: dict):
-        self.services = services_dict
+        def __init__(self, services_dict: dict):
+            self.services = services_dict
 
-    def add_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        info = zc.get_service_info(type_, name)
-        if info:
-            self.services[name] = {
-                "name": name.replace("._screencast._tcp.local.", ""),
-                "host": socket.inet_ntoa(info.addresses[0]),
-                "port": info.port,
-                "properties": dict(info.properties.items())
-            }
-            logger.info(f"[mDNS] 发现设备: {name}")
+        def add_service(self, zc, type_: str, name: str) -> None:
+            info = zc.get_service_info(type_, name)
+            if info:
+                self.services[name] = {
+                    "name": name.replace("._screencast._tcp.local.", ""),
+                    "host": socket.inet_ntoa(info.addresses[0]),
+                    "port": info.port,
+                    "properties": dict(info.properties.items())
+                }
+                logger.info(f"[mDNS] 发现设备: {name}")
 
-    def remove_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        if name in self.services:
-            del self.services[name]
+        def remove_service(self, zc, type_: str, name: str) -> None:
+            if name in self.services:
+                del self.services[name]
 
-    def update_service(self, zc: Zeroconf, type_: str, name: str) -> None:
-        info = zc.get_service_info(type_, name)
-        if info:
-            self.services[name] = {
-                "name": name.replace("._screencast._tcp.local.", ""),
-                "host": socket.inet_ntoa(info.addresses[0]),
-                "port": info.port,
-                "properties": dict(info.properties.items())
-            }
-            logger.info(f"[mDNS] 发现设备: {name}")
+        def update_service(self, zc, type_: str, name: str) -> None:
+            info = zc.get_service_info(type_, name)
+            if info:
+                self.services[name] = {
+                    "name": name.replace("._screencast._tcp.local.", ""),
+                    "host": socket.inet_ntoa(info.addresses[0]),
+                    "port": info.port,
+                    "properties": dict(info.properties.items())
+                }
+                logger.info(f"[mDNS] 发现设备: {name}")
 
 
 # 全局实例

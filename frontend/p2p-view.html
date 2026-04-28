@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P 观看</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:Arial,sans-serif; background:#1a1a2e; color:#fff; padding:2rem; text-align:center; }
+    input { padding:.8rem; font-size:1.1rem; border-radius:8px; border:none; width:280px; text-align:center; }
+    button { padding:.8rem 1.5rem; font-size:1.1rem; border:none; border-radius:8px; background:#6c5ce7; color:#fff; cursor:pointer; margin:.5rem; }
+    button:hover { background:#5a4bd1; }
+    button:disabled { background:#444; cursor:not-allowed; }
+    #log { text-align:left; background:rgba(0,0,0,.4); padding:1rem; margin-top:1rem; border-radius:8px; max-height:300px; overflow-y:auto; font-size:.85rem; color:#ccc; white-space:pre-wrap; }
+    video { width:100%; max-width:960px; margin-top:1rem; border-radius:8px; display:none; background:#000; }
+    #status { color:#a29bfe; margin:.5rem 0; }
+  </style>
+</head>
+<body>
+  <h1>P2P 观看</h1>
+  <p>输入投屏 ID:</p>
+  <input id="sid" placeholder="p2p_xxx">
+  <br>
+  <button onclick="join()">连接</button>
+  <button onclick="leave()" style="display:none" id="btnLeave">断开</button>
+  <div id="status"></div>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+const log = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+const statusEl = document.getElementById('status');
+
+let pc = null, ws = null, currentSid = '', intentionalClose = false;
+const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+
+function setStatus(m) { statusEl.textContent = m; }
+
+async function connectAndRegister(sid) {
+  intentionalClose = false;
+  return new Promise((resolve, reject) => {
+    ws = new WebSocket(WS);
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('WS 连接超时')); }, 10000);
+    ws.onopen = () => {
+      clearTimeout(timeout);
+      log('[*] WS 已连接');
+      ws.send(JSON.stringify({ t:'reg', s: sid }));
+      log('[*] 已注册为 viewer');
+      setStatus('已连接，等待画面...');
+      resolve();
+    };
+    ws.onerror = () => { clearTimeout(timeout); reject(new Error('WS 连接失败')); };
+    ws.onclose = () => {
+      log('[*] WS 断开');
+      if (!intentionalClose) {
+        setStatus('连接断开，3秒后重连...');
+        setTimeout(() => reconnect(sid), 3000);
+      }
+    };
+  });
+}
+
+function setupWSHandler(sid) {
+  ws.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      log('[*] 收到: ' + d.t);
+      if (d.t === 'offer') {
+        handleOffer(sid, d);
+      } else if (d.t === 'ice') {
+        handleIce(d);
+      } else if (d.t === 'stopped') {
+        log('[*] 发送端已停止');
+        setStatus('发送端已停止');
+        closePC();
+      } else if (d.t === 'error') {
+        setStatus('错误: ' + (d.msg || d.message));
+      }
+    } catch(e) { log('[!] onmessage 错误: ' + e); }
+  };
+}
+
+async function handleOffer(sid, d) {
+  log('[*] setRemoteDescription, sdp len=' + d.sdp.length);
+
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+
+  pc = new RTCPeerConnection({ iceServers: [] });
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) { log('[*] ICE 收集完成'); return; }
+    send({ t:'ice', s: sid, c: e.candidate.candidate, m: e.candidate.sdpMid, l: e.candidate.sdpMLineIndex });
+    log('[*] ICE: ' + e.candidate.candidate.substring(0,60));
+  };
+  pc.oniceconnectionstatechange = () => {
+    log('[*] ICE state: ' + pc.iceConnectionState);
+    if (pc.iceConnectionState === 'connected') setStatus('P2P 已连接');
+  };
+  pc.onconnectionstatechange = () => {
+    log('[*] CONN state: ' + pc.connectionState);
+    if (pc.connectionState === 'connected') setStatus('画面传输中');
+    else if (pc.connectionState === 'failed') setStatus('连接失败');
+  };
+  pc.ontrack = (e) => {
+    log('[*] ontrack! kind=' + e.track.kind + ' streams=' + e.streams.length);
+    const vid = document.getElementById('video');
+    vid.srcObject = e.streams[0] || new MediaStream([e.track]);
+    vid.style.display = 'block';
+    vid.play().then(() => { setStatus('播放中'); log('[*] 视频播放中!'); }).catch(e => log('[!] play失败: ' + e));
+    document.getElementById('btnLeave').style.display = 'inline-block';
+  };
+
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription({ type:'offer', sdp: d.sdp }));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    send({ t:'answer', s: sid, sdp: answer.sdp });
+    log('[*] answer 已发送, sdp len=' + answer.sdp.length);
+  } catch(e) {
+    log('[!] offer 处理失败: ' + e);
+  }
+}
+
+async function handleIce(d) {
+  if (!pc) return;
+  try {
+    await pc.addIceCandidate(new RTCIceCandidate({ candidate: d.c, sdpMid: d.m, sdpMLineIndex: d.l }));
+  } catch(e) { /* 忽略重复的 ICE */ }
+}
+
+function closePC() {
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+  document.getElementById('video').style.display = 'none';
+  document.getElementById('btnLeave').style.display = 'none';
+}
+
+function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+
+async function reconnect(sid) {
+  if (intentionalClose) return;
+  log('[*] 尝试重连 sid=' + sid);
+  try {
+    await connectAndRegister(sid);
+    setupWSHandler(sid);
+    log('[*] 重连成功');
+  } catch(e) {
+    log('[!] 重连失败: ' + e);
+    setStatus('重连失败，请手动重试');
+  }
+}
+
+async function join() {
+  const sid = document.getElementById('sid').value.trim();
+  if (!sid) return;
+  currentSid = sid;
+  document.getElementById('btnLeave').style.display = 'none';
+  try {
+    await connectAndRegister(sid);
+    setupWSHandler(sid);
+  } catch(e) {
+    log('[!] 连接失败: ' + e);
+    setStatus('连接失败');
+  }
+}
+
+function leave() {
+  intentionalClose = true;
+  send({ t:'leave', s: currentSid });
+  closePC();
+  if (ws) { ws.close(); ws = null; }
+  currentSid = '';
+  setStatus('已断开');
+  log('[*] 已断开');
+}
+</script>
+</body>
+</html>

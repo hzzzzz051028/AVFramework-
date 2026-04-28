@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>P2P 投屏</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:Arial,sans-serif; background:#1a1a2e; color:#fff; padding:2rem; text-align:center; }
+    button { padding:1rem 2rem; font-size:1.2rem; border:none; border-radius:8px; background:#6c5ce7; color:#fff; cursor:pointer; margin:1rem; }
+    button:hover { background:#5a4bd1; }
+    button:disabled { background:#444; cursor:not-allowed; }
+    #log { text-align:left; background:rgba(0,0,0,.4); padding:1rem; margin-top:1rem; border-radius:8px; max-height:300px; overflow-y:auto; font-size:.85rem; color:#ccc; white-space:pre-wrap; }
+    video { width:100%; max-width:960px; margin-top:1rem; border-radius:8px; display:none; background:#000; }
+    #sid { font-size:1.5rem; color:#a29bfe; margin:1rem 0; word-break:break-all; user-select:all; }
+  </style>
+</head>
+<body>
+  <h1>P2P 投屏</h1>
+  <button id="btnStart" onclick="start()">开始投屏</button>
+  <button id="btnStop" onclick="stop()" style="display:none">停止</button>
+  <div id="sid"></div>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="log"></div>
+
+<script>
+const logEl = document.getElementById('log');
+const logLine = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.scrollHeight; };
+
+let pc = null, ws = null, stream = null, sessionId = null;
+let stopped = false;
+const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+
+async function connectWS() {
+  return new Promise((resolve, reject) => {
+    ws = new WebSocket(WS);
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('WS 连接超时')); }, 10000);
+    ws.onopen = () => { clearTimeout(timeout); logLine('[*] WS 已连接'); resolve(); };
+    ws.onerror = () => { clearTimeout(timeout); reject(new Error('WS 连接失败')); };
+    ws.onclose = () => {
+      logLine('[*] WS 断开');
+      if (!stopped && stream) {
+        logLine('[*] 3秒后尝试重连...');
+        setTimeout(async () => {
+          try {
+            await connectWS();
+            setupWSHandler();
+            logLine('[*] WS 重连成功');
+          } catch(e) { logLine('[!] 重连失败: ' + e); }
+        }, 3000);
+      }
+    };
+  });
+}
+
+function setupWSHandler() {
+  ws.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      logLine('[*] 收到: ' + d.t + (d.sdp ? ' (sdp len=' + d.sdp.length + ')' : ''));
+      if (d.t === 'answer') {
+        if (pc && pc.signalingState !== 'closed') {
+          pc.setRemoteDescription(new RTCSessionDescription({ type:'answer', sdp: d.sdp }))
+            .then(() => logLine('[*] remote desc OK! conn=' + pc.connectionState + ' ice=' + pc.iceConnectionState))
+            .catch(e => logLine('[!] remote desc 失败: ' + e));
+        }
+      } else if (d.t === 'ice') {
+        if (pc && pc.signalingState !== 'closed') {
+          pc.addIceCandidate(new RTCIceCandidate({ candidate: d.c, sdpMid: d.m, sdpMLineIndex: d.l }))
+            .catch(e => logLine('[!] addIce 失败: ' + e));
+        }
+      } else if (d.t === 'new_viewer') {
+        logLine('[*] 新 viewer 加入, 创建新 offer...');
+        createOffer();
+      }
+    } catch(e) { logLine('[!] onmessage 错误: ' + e); }
+  };
+}
+
+function setupPC() {
+  if (pc) { try { pc.close(); } catch(e){} }
+  pc = new RTCPeerConnection({ iceServers: [] });
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) { logLine('[*] ICE 收集完成'); return; }
+    logLine('[*] ICE: ' + e.candidate.candidate.substring(0,60));
+    send({ t:'ice', s: sessionId, c: e.candidate.candidate, m: e.candidate.sdpMid, l: e.candidate.sdpMLineIndex });
+  };
+  pc.oniceconnectionstatechange = () => logLine('[*] ICE state: ' + pc.iceConnectionState);
+  pc.onconnectionstatechange = () => {
+    logLine('[*] CONN state: ' + pc.connectionState);
+    if (pc.connectionState === 'connected') logLine('[*] ====== P2P 连接成功! ======');
+  };
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+}
+
+async function createOffer() {
+  if (!pc) setupPC();
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    logLine('[*] Offer 创建, sdp len=' + offer.sdp.length);
+    send({ t:'offer', s: sessionId, sdp: offer.sdp });
+    logLine('[*] Offer 已发送');
+  } catch(e) { logLine('[!] createOffer 失败: ' + e); }
+}
+
+async function start() {
+  stopped = false;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: {cursor:'always'}, audio:true });
+    document.getElementById('video').srcObject = stream;
+    document.getElementById('video').style.display = 'block';
+    logLine('[*] 屏幕捕获成功');
+
+    await connectWS();
+    setupWSHandler();
+
+    sessionId = 'p2p_' + Date.now().toString(36);
+    document.getElementById('sid').textContent = sessionId;
+    document.getElementById('btnStart').style.display = 'none';
+    document.getElementById('btnStop').style.display = 'inline-block';
+
+    setupPC();
+    await createOffer();
+
+  } catch(e) { logLine('[!] 启动失败: ' + e); }
+}
+
+function send(msg) { if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg)); }
+
+function stop() {
+  stopped = true;
+  send({ t:'stop', s: sessionId });
+  if (pc) { pc.close(); pc = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (ws) { ws.close(); ws = null; }
+  document.getElementById('video').style.display = 'none';
+  document.getElementById('btnStart').style.display = 'inline-block';
+  document.getElementById('btnStop').style.display = 'none';
+  document.getElementById('sid').textContent = '';
+  sessionId = null;
+  logLine('[*] 已停止');
+}
+</script>
+</body>
+</html>

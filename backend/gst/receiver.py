@@ -142,6 +142,7 @@ class StreamReceiver:
             promise = Gst.Promise.new()
             self._webrtcbin.emit("set-remote-description", offer, promise)
             promise.wait()
+            promise.interrupt()
 
         if self._glib_ctx:
             self._glib_ctx.invoke_full(0, do_set_remote)
@@ -265,6 +266,7 @@ class StreamReceiver:
         set_promise = Gst.Promise.new()
         element.emit("set-local-description", answer, set_promise)
         set_promise.wait()
+        set_promise.interrupt()
 
         logger.info("[%s] SDP Answer 已生成 (%d bytes)", self.session_id, len(answer.sdp.as_text()))
         self._answer_event.set()

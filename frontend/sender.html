@@ -547,9 +547,11 @@
           log('info', '发送 ICE 候选: ' + event.candidate.candidate.split(':')[0]);
           if (wsConnection && wsConnection.readyState === WebSocket.OPEN) {
             wsConnection.send(JSON.stringify({
-              type: 'ice_candidate',
+              type: 'relay_ice',
               session_id: sessionId,
-              candidate: JSON.stringify(event.candidate),
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex,
             }));
           }
         };
@@ -562,27 +564,39 @@
         sessionId = 'ws_' + Date.now().toString(36);
 
         wsConnection.send(JSON.stringify({
-          type: 'offer',
+          type: 'relay_offer',
           session_id: sessionId,
-          sdp: JSON.stringify(offer),
+          sdp: offer.sdp,
         }));
 
         document.getElementById('sessionId').textContent = sessionId;
         document.getElementById('sessionCard').style.display = 'block';
 
         wsConnection.onmessage = async (event) => {
-          const msg = JSON.parse(event.data);
-          console.log('[WS] 收到消息:', msg.type);
+          try {
+            const msg = JSON.parse(event.data);
+            console.log('[WS] 收到消息:', msg.type, JSON.stringify(msg).substring(0, 200));
 
-          if (msg.type === 'answer') {
-            log('info', '收到 SDP Answer...');
-            const answer = JSON.parse(msg.sdp);
-            await pc.setRemoteDescription(new RTCSessionDescription(answer));
-            log('ok', 'SDP Answer 已设置, Remote Description: ' + answer.type);
-          } else if (msg.type === 'ice_candidate') {
-            log('info', '收到 ICE 候选');
-            const candidate = JSON.parse(msg.candidate);
-            await pc.addIceCandidate(new RTCIceCandidate(candidate));
+            if (msg.type === 'answer') {
+              log('info', '收到 SDP Answer, sdp type:', typeof msg.sdp, 'len:', msg.sdp?.length);
+              const sdpStr = typeof msg.sdp === 'string' ? msg.sdp : JSON.stringify(msg.sdp);
+              console.log('[WS] setRemoteDescription with sdp len:', sdpStr.length);
+              await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: sdpStr }));
+              log('ok', 'SDP Answer 已设置, connectionState:', pc.connectionState, 'iceState:', pc.iceConnectionState);
+            } else if (msg.type === 'ice_candidate') {
+              log('info', '收到 ICE 候选:', msg.candidate?.substring(0, 80));
+              try {
+                await pc.addIceCandidate(new RTCIceCandidate({ candidate: msg.candidate, sdpMid: msg.sdpMid, sdpMLineIndex: msg.sdpMLineIndex }));
+                log('info', 'ICE 候选已添加');
+              } catch (e) {
+                log('warn', 'ICE 候选添加失败: ' + e.message);
+              }
+            } else {
+              log('warn', '未知消息类型: ' + msg.type);
+            }
+          } catch (e) {
+            console.error('[WS] onmessage 错误:', e);
+            log('err', '消息处理失败: ' + e.message);
           }
         };
 
@@ -633,11 +647,8 @@
 
     function createPeerConnection() {
       const config = {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ],
-        iceCandidatePoolSize: 10
+        iceServers: [],
+        iceCandidatePoolSize: 0
       };
       const conn = new RTCPeerConnection(config);
 

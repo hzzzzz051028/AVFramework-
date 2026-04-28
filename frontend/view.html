@@ -45,6 +45,7 @@
       margin: 0.5rem;
     }
     button:hover { background: #5568d3; }
+    button:disabled { background: #444; cursor: not-allowed; }
     #status { margin-top: 1rem; font-size: 1.1rem; }
     video {
       width: 100%;
@@ -61,9 +62,9 @@
 
   <div class="container">
     <p>请输入会话 ID：</p>
-    <input type="text" id="sessionId" placeholder="例如: sess_abc123">
+    <input type="text" id="sessionId" placeholder="例如: ws_abc123">
     <br>
-    <button onclick="join()">连接</button>
+    <button onclick="join()" id="joinBtn">连接</button>
     <button onclick="disconnect()" style="display:none;" id="disconnectBtn">断开</button>
     <p id="status">等待连接...</p>
   </div>
@@ -71,197 +72,148 @@
   <video id="video" autoplay playsinline muted></video>
 
   <script>
-    // WebSocket 与 HTTP 共用端口
     const wsHost = window.location.hostname || 'localhost';
     const wsPort = window.location.port || '8080';
-    const WS_URL = `ws://${wsHost}:${wsPort}/ws`;
+    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const WS_URL = `${wsProtocol}//${wsHost}:${wsPort}/ws`;
+
     let ws = null;
     let pc = null;
-    let sessionId = null;
-    let reconnectTimer = null;
-    let reconnectAttempts = 0;
-    const MAX_RECONNECT = 3;
+    let currentSessionId = null;
 
-    function setStatus(msg) {
-      document.getElementById('status').textContent = msg;
-    }
-
-    function tryReconnect() {
-      if (reconnectAttempts >= MAX_RECONNECT || !sessionId) return;
-      reconnectAttempts++;
-      const delay = 2000 * reconnectAttempts;
-      setStatus(`连接断开，${delay/1000}秒后重连... (${reconnectAttempts}/${MAX_RECONNECT})`);
-      reconnectTimer = setTimeout(() => join(), delay);
-    }
+    function setStatus(msg) { document.getElementById('status').textContent = msg; }
 
     async function join() {
-      if (!sessionId) {
-        sessionId = document.getElementById('sessionId').value.trim();
-      }
-      if (!sessionId) {
-        alert('请输入会话 ID');
-        return;
-      }
+      const sid = document.getElementById('sessionId').value.trim();
+      if (!sid) { alert('请输入会话 ID'); return; }
 
+      currentSessionId = sid;
+      document.getElementById('joinBtn').disabled = true;
       setStatus('正在连接...');
 
       try {
         ws = new WebSocket(WS_URL);
 
         ws.onopen = () => {
-          console.log('[WS] WebSocket 已连接');
-          setStatus('已连接服务器，加入会话...');
-          reconnectAttempts = 0;
+          // 注册为 viewer
           ws.send(JSON.stringify({
-            type: 'join_session',
-            session_id: sessionId
+            type: 'register_viewer',
+            session_id: sid
           }));
+          setStatus('已连接服务器，等待投屏方...');
         };
 
         ws.onmessage = async (event) => {
           try {
             const data = JSON.parse(event.data);
-            console.log('[WS] 收到消息:', data.type);
+            console.log('[viewer] 收到消息:', data.type);
 
             if (data.type === 'offer') {
-              await handleOffer(data.sdp);
+              await handleOffer(data);
             } else if (data.type === 'ice_candidate') {
-              await handleIce(data.candidate);
+              await handleIce(data);
             } else if (data.type === 'error') {
-              console.error('[WS] 错误:', data.message);
               setStatus('错误: ' + data.message);
-            } else if (data.type === 'session_ended') {
-              setStatus('会话已结束');
             }
           } catch (e) {
-            console.error('[WS] 消息处理失败:', e);
+            console.error('[viewer] 处理消息失败:', e);
+            setStatus('错误: ' + e.message);
           }
         };
 
-        ws.onerror = () => {
-          setStatus('连接失败');
-        };
-
-        ws.onclose = () => {
-          console.log('[WS] WebSocket 连接关闭');
-          setStatus('连接已断开');
-          tryReconnect();
-        };
-
-      } catch (error) {
-        setStatus('错误: ' + error.message);
+        ws.onerror = (e) => { console.error('[viewer] WS错误', e); setStatus('连接失败'); };
+        ws.onclose = (e) => { console.log('[viewer] WS关闭', e.code, e.reason); setStatus('连接已断开'); };
+      } catch (e) {
+        setStatus('错误: ' + e.message);
+        document.getElementById('joinBtn').disabled = false;
       }
     }
 
     function createPeerConnection() {
-      console.log('[PC] 创建 PeerConnection');
-      const config = {
-        iceServers: [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ]
-      };
-      pc = new RTCPeerConnection(config);
-
-      pc.onicegatheringstatechange = () => {
-        console.log('[PC] ICE 收集状态:', pc.iceGatheringState);
-      };
+      pc = new RTCPeerConnection({
+        iceServers: []
+      });
 
       pc.onicecandidate = (event) => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        if (event.candidate) {
-          ws.send(JSON.stringify({
-            type: 'ice_candidate',
-            session_id: sessionId,
-            candidate: JSON.stringify(event.candidate)
-          }));
-        }
+        if (!event.candidate || !ws || ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({
+          type: 'relay_ice',
+          session_id: currentSessionId,
+          candidate: event.candidate.candidate,
+          sdpMid: event.candidate.sdpMid,
+          sdpMLineIndex: event.candidate.sdpMLineIndex,
+        }));
       };
 
       pc.ontrack = (event) => {
-        console.log('[PC] 收到远程轨道:', event.track.kind);
-
         const video = document.getElementById('video');
-        const stream = event.streams[0] || new MediaStream([event.track]);
-        video.srcObject = stream;
+        video.srcObject = event.streams[0] || new MediaStream([event.track]);
         video.style.display = 'block';
-
         video.play().then(() => {
           setStatus('已连接 - 视频播放中');
         }).catch(err => {
-          setStatus('错误: 视频播放失败 - ' + err.message);
+          setStatus('播放失败: ' + err.message);
         });
-
         document.getElementById('disconnectBtn').style.display = 'inline-block';
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'connected') {
-          console.log('[PC] WebRTC 连接成功!');
-        } else if (pc.connectionState === 'failed') {
-          setStatus('连接失败');
-        }
+        console.log('[viewer] connectionState:', pc.connectionState);
+        if (pc.connectionState === 'connected') setStatus('已连接');
+        else if (pc.connectionState === 'failed') setStatus('连接失败');
       };
 
       pc.oniceconnectionstatechange = () => {
-        console.log('[PC] ICE 连接状态:', pc.iceConnectionState);
+        console.log('[viewer] iceConnectionState:', pc.iceConnectionState);
+      };
+
+      pc.onicegatheringstatechange = () => {
+        console.log('[viewer] iceGatheringState:', pc.iceGatheringState);
       };
     }
 
-    async function handleOffer(offerStr) {
-      try {
-        if (!pc) createPeerConnection();
+    async function handleOffer(data) {
+      console.log('[viewer] handleOffer start, sdp length:', data.sdp?.length);
+      if (!pc) createPeerConnection();
 
-        const offer = JSON.parse(offerStr);
-        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      setStatus('收到 Offer，生成 Answer...');
+      console.log('[viewer] setRemoteDescription...');
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: data.sdp }));
+      console.log('[viewer] setRemoteDescription done, createAnswer...');
 
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+      const answer = await pc.createAnswer();
+      console.log('[viewer] createAnswer done, setLocalDescription...');
+      await pc.setLocalDescription(answer);
+      console.log('[viewer] setLocalDescription done, send answer');
 
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'answer',
-            session_id: sessionId,
-            sdp: JSON.stringify(answer)
-          }));
-        }
-      } catch (e) {
-        console.error('[Offer] 处理失败:', e);
-        setStatus('SDP 协商失败: ' + e.message);
-      }
+      ws.send(JSON.stringify({
+        type: 'relay_answer',
+        session_id: currentSessionId,
+        sdp: answer.sdp,
+      }));
+
+      setStatus('ICE 协商中...');
     }
 
-    async function handleIce(candidateStr) {
+    async function handleIce(data) {
       if (!pc) return;
       try {
-        const candidate = JSON.parse(candidateStr);
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch (e) {
-        console.warn('[ICE] 添加候选失败:', e);
-      }
+        await pc.addIceCandidate(new RTCIceCandidate({
+          candidate: data.candidate,
+          sdpMid: data.sdpMid,
+          sdpMLineIndex: data.sdpMLineIndex
+        }));
+      } catch (e) {}
     }
 
     function disconnect() {
-      if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-      }
-      reconnectAttempts = MAX_RECONNECT; // 阻止自动重连
-      sessionId = null;
-
-      if (pc) {
-        pc.close();
-        pc = null;
-      }
-      if (ws) {
-        ws.close();
-        ws = null;
-      }
-
-      const video = document.getElementById('video');
-      video.srcObject = null;
-      video.style.display = 'none';
+      if (pc) { pc.close(); pc = null; }
+      if (ws) { ws.close(); ws = null; }
+      document.getElementById('video').srcObject = null;
+      document.getElementById('video').style.display = 'none';
       document.getElementById('disconnectBtn').style.display = 'none';
+      document.getElementById('joinBtn').disabled = false;
+      currentSessionId = null;
       setStatus('已断开');
     }
   </script>

@@ -476,12 +476,16 @@ async def handle_ws_message(cid, data):
 
     # sender 发送 offer
     if msg_type in ("relay_offer", "offer") and fmt == "short":
+        is_new = room is None or room.sender is None
         if room is None:
             room = Room(sid)
             rooms[sid] = room
         room.sender = cid
         room.sender_fmt = fmt
         client_to_room[cid] = sid
+        # Auto-start HDMI display for new sender
+        if is_new:
+            asyncio.ensure_future(_auto_start_display(sid))
         sdp = data.get("sdp", "")
         offer_msgs = {
             "short": _make_short("offer", sid, sdp=sdp),
@@ -540,6 +544,9 @@ async def handle_ws_message(cid, data):
         if room and room.is_sender(cid):
             for vcid, vfmt in list(room.viewers.items()):
                 await _send_to(vcid, _msg_for(vfmt, "stopped", "stopped", sid))
+            # Auto-stop HDMI display
+            if _display_room_id == sid:
+                asyncio.ensure_future(_stop_display())
             room.sender = None
             room.pending_offer = {}
             room.pending_ice = []
@@ -565,6 +572,9 @@ def handle_ws_disconnect(ws, cid):
                 for vcid, vfmt in list(room.viewers.items()):
                     msg = _msg_for(vfmt, "stopped", "stopped", room_id)
                     asyncio.ensure_future(_send_to(vcid, msg))
+                # Auto-stop HDMI display on sender disconnect
+                if _display_room_id == room_id:
+                    asyncio.ensure_future(_stop_display())
                 room.sender = None
                 room.pending_offer = {}
                 room.pending_ice = []
@@ -688,7 +698,8 @@ async def p2p_sender_handler(request):
 # ========================================
 # HDMI 显示管理
 # ========================================
-_display_process = None  # xinit subprocess
+_display_process = None
+_display_room_id = None
 
 
 async def display_handler(request):
@@ -743,7 +754,7 @@ async def api_display_start(request):
 
 async def _stop_display():
     """停止 HDMI 显示进程"""
-    global _display_process
+    global _display_process, _display_room_id
 
     if _display_process and _display_process.poll() is None:
         pid = _display_process.pid
@@ -759,8 +770,32 @@ async def _stop_display():
             except (ProcessLookupError, PermissionError):
                 _display_process.kill()
             _display_process.wait()
-        logger.info("[DISPLAY] stopped pid=%d", pid)
+        logger.info("[DISPLAY] stopped pid=%d room=%s", pid, _display_room_id)
     _display_process = None
+    _display_room_id = None
+
+
+async def _auto_start_display(sid):
+    """Auto-start HDMI display when sender begins sharing."""
+    global _display_process, _display_room_id
+
+    if _display_process and _display_process.poll() is None:
+        logger.info("[DISPLAY] stopping old display for new session %s", sid)
+        await _stop_display()
+
+    ws_url = f"ws://localhost:{config.ws_port}/ws"
+    script = str(Path(__file__).resolve().parent / "hdmi_receiver.py")
+    try:
+        log_file = open("/tmp/hdmi_receiver.log", "w")
+        _display_process = subprocess.Popen(
+            ["python3", script, sid, ws_url],
+            stdout=log_file, stderr=log_file,
+            preexec_fn=os.setpgrp,
+        )
+        _display_room_id = sid
+        logger.info("[DISPLAY] auto-started pid=%d room=%s", _display_process.pid, sid)
+    except Exception as e:
+        logger.error("[DISPLAY] auto-start failed: %s", e)
 
 
 async def api_display_stop(request):

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Display Output</title>
+  <style>
+    * { margin:0; padding:0; }
+    html, body { width:100%; height:100%; background:#000; overflow:hidden; }
+    video { width:100%; height:100%; object-fit:contain; display:block; }
+    #info { position:fixed; bottom:1rem; left:50%; transform:translateX(-50%); color:#666; font:14px monospace; opacity:0.8; pointer-events:none; text-align:center; max-width:90%; word-wrap:break-word; }
+  </style>
+</head>
+<body>
+  <video id="video" autoplay playsinline muted></video>
+  <div id="info"></div>
+
+<script>
+const video = document.getElementById('video');
+const info = document.getElementById('info');
+const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+
+let pc = null, ws = null, sid = '', intentionalClose = false;
+
+const params = new URLSearchParams(location.search);
+sid = params.get('s') || params.get('session') || '';
+
+function setStatus(m) { info.textContent = sid ? `[${sid}] ${m}` : m; }
+
+async function connect() {
+  intentionalClose = false;
+  return new Promise((resolve, reject) => {
+    ws = new WebSocket(WS);
+    const timeout = setTimeout(() => { ws.close(); reject(new Error('timeout')); }, 10000);
+    ws.onopen = () => {
+      clearTimeout(timeout);
+      ws.send(JSON.stringify({ t: 'reg', s: sid }));
+      setStatus('WS OK, waiting...');
+      resolve();
+    };
+    ws.onerror = (e) => { clearTimeout(timeout); setStatus('WS error'); reject(new Error('ws error')); };
+    ws.onclose = () => {
+      if (!intentionalClose) {
+        setStatus('WS closed, reconnecting...');
+        setTimeout(() => connect().catch(() => setTimeout(connect, 3000)), 3000);
+      }
+    };
+  });
+}
+
+function setupHandlers() {
+  ws.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      setStatus('msg: ' + d.t);
+      if (d.t === 'offer') handleOffer(d);
+      else if (d.t === 'ice') handleIce(d);
+      else if (d.t === 'stopped') { setStatus('sender stopped'); closePC(); }
+      else if (d.t === 'error') setStatus('Error: ' + (d.msg || ''));
+    } catch(e) { setStatus('Parse error: ' + e); }
+  };
+}
+
+async function handleOffer(d) {
+  setStatus('Got offer, creating PC...');
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+
+  pc = new RTCPeerConnection({ iceServers: [] });
+  pc.onicecandidate = (e) => {
+    if (!e.candidate) return;
+    ws.send(JSON.stringify({ t:'ice', s: sid, c: e.candidate.candidate, m: e.candidate.sdpMid, l: e.candidate.sdpMLineIndex }));
+  };
+  pc.onconnectionstatechange = () => {
+    setStatus('CONN: ' + pc.connectionState);
+    if (pc.connectionState === 'connected') {
+      info.style.color = '#0f0';
+      setStatus('PLAYING');
+    } else if (pc.connectionState === 'failed') {
+      info.style.color = '#f00';
+      setStatus('CONN FAILED');
+    }
+  };
+  pc.oniceconnectionstatechange = () => {
+    setStatus('ICE: ' + pc.iceConnectionState);
+  };
+  pc.ontrack = (e) => {
+    setStatus('ontrack! kind=' + e.track.kind);
+    video.srcObject = e.streams[0] || new MediaStream([e.track]);
+    video.play().catch(() => {});
+  };
+
+  try {
+    await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: d.sdp }));
+    setStatus('Remote desc OK, creating answer...');
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    ws.send(JSON.stringify({ t: 'answer', s: sid, sdp: answer.sdp }));
+    setStatus('Answer sent, waiting for ICE...');
+  } catch(e) {
+    setStatus('Offer failed: ' + e.message);
+  }
+}
+
+async function handleIce(d) {
+  if (!pc) return;
+  try { await pc.addIceCandidate(new RTCIceCandidate({ candidate: d.c, sdpMid: d.m, sdpMLineIndex: d.l })); } catch(e) {}
+}
+
+function closePC() {
+  if (pc) { try { pc.close(); } catch(e){} pc = null; }
+  video.srcObject = null;
+}
+
+async function start() {
+  if (!sid) { setStatus('No session ID'); return; }
+  setStatus('Connecting...');
+  try {
+    await connect();
+    setupHandlers();
+    setStatus('Waiting for video...');
+  } catch(e) {
+    setStatus('Connect failed: ' + e);
+    setTimeout(start, 3000);
+  }
+}
+
+start();
+</script>
+</body>
+</html>

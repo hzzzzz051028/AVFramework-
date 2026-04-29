@@ -8,7 +8,9 @@ import asyncio
 import json
 import logging
 import os
+import signal
 import socket
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -454,6 +456,19 @@ async def handle_ws_message(cid, data):
             return
         room.viewers[cid] = fmt
         client_to_room[cid] = sid
+        # 告诉 viewer sender 的真实 IP (用于替换 mDNS candidates)
+        sender_ws = _get_ws(room.sender)
+        sender_ip = ""
+        if sender_ws:
+            r = sender_ws.remote
+            sender_ip = r[0] if isinstance(r, tuple) else str(r).split(":")[0]
+        print(f"[DEBUG] sender_ws={sender_ws} remote={sender_ws.remote if sender_ws else None} sender_ip={sender_ip}", flush=True)
+        await _send_to(cid, _make_short("reg_ok", sid, sender_ip=sender_ip))
+        # 转发缓存的 ICE candidates 给新 viewer
+        for ice_pair in room.pending_ice:
+            imsg = ice_pair.get(fmt)
+            if imsg:
+                await _send_to(cid, imsg)
         # 通知 sender 有新 viewer，让 sender 创建全新的 offer (解决重连黑屏)
         await _send_to(room.sender, _make_short("new_viewer", sid))
         print(f"[ROOM] viewer 加入: room={sid} cid={cid} viewers={len(room.viewers)}", flush=True)
@@ -473,7 +488,6 @@ async def handle_ws_message(cid, data):
             "long": _make_long("offer", sid, sdp=sdp),
         }
         room.pending_offer = offer_msgs
-        room.pending_ice = []
         # 转发给所有在线 viewer
         for vcid, vfmt in list(room.viewers.items()):
             msg = offer_msgs.get(vfmt)
@@ -671,6 +685,99 @@ async def p2p_sender_handler(request):
     return web.Response(text="P2P sender not found", status=404)
 
 
+# ========================================
+# HDMI 显示管理
+# ========================================
+_display_process = None  # xinit subprocess
+
+
+async def display_handler(request):
+    """HDMI 显示页面"""
+    path = FRONTEND_DIR / "display.html"
+    if path.exists():
+        return web.FileResponse(path)
+    return web.Response(text="Display page not found", status=404)
+
+
+async def api_display_start(request):
+    """POST /api/display/start - 启动 HDMI 原生显示 (GStreamer webrtcbin + kmssink)"""
+    global _display_process
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid json"}, status=400)
+
+    sid = body.get("session_id", "")
+    if not sid:
+        return web.json_response({"error": "missing session_id"}, status=400)
+
+    await _stop_display()
+
+    # 使用纯 HTTP 端口的 WebSocket
+    ws_url = f"ws://localhost:{config.ws_port}/ws"
+    script = str(Path(__file__).resolve().parent / "hdmi_receiver.py")
+
+    try:
+        log_file = open("/tmp/hdmi_receiver.log", "w")
+        _display_process = subprocess.Popen(
+            ["python3", script, sid, ws_url],
+            stdout=log_file, stderr=log_file,
+            preexec_fn=os.setpgrp,
+        )
+        time.sleep(2)
+
+        if _display_process.poll() is not None:
+            log_file.close()
+            with open("/tmp/hdmi_receiver.log") as f:
+                log_content = f.read()
+            logger.error("[DISPLAY] receiver failed: %s", log_content[-500:])
+            return web.json_response({"error": f"receiver failed: {log_content[-200:]}"}, status=500)
+
+        logger.info("[DISPLAY] started pid=%d sid=%s", _display_process.pid, sid)
+        return web.json_response({"status": "started", "pid": _display_process.pid, "sid": sid})
+    except FileNotFoundError as e:
+        return web.json_response({"error": f"{e.strerror}: python3 or hdmi_receiver.py not found"}, status=500)
+    except Exception as e:
+        return web.json_response({"error": str(e)}, status=500)
+
+
+async def _stop_display():
+    """停止 HDMI 显示进程"""
+    global _display_process
+
+    if _display_process and _display_process.poll() is None:
+        pid = _display_process.pid
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            _display_process.terminate()
+        try:
+            _display_process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                _display_process.kill()
+            _display_process.wait()
+        logger.info("[DISPLAY] stopped pid=%d", pid)
+    _display_process = None
+
+
+async def api_display_stop(request):
+    """DELETE /api/display/stop - 停止 HDMI 显示"""
+    await _stop_display()
+    return web.json_response({"status": "stopped"})
+
+
+async def api_display_status(request):
+    """GET /api/display/status - 查询 HDMI 显示状态"""
+    global _display_process
+    if _display_process and _display_process.poll() is None:
+        return web.json_response({"running": True, "pid": _display_process.pid})
+    _display_process = None
+    return web.json_response({"running": False})
+
+
 async def p2p_view_handler(request):
     """P2P 观看端 (minimal)"""
     path = FRONTEND_DIR / "p2p-view.html"
@@ -728,6 +835,12 @@ def create_app():
     app.router.add_get("/terminal-view.html", terminal_view_handler)
     app.router.add_get("/p2p-sender.html", p2p_sender_handler)
     app.router.add_get("/p2p-view.html", p2p_view_handler)
+    app.router.add_get("/display.html", display_handler)
+
+    # HDMI 显示管理
+    app.router.add_post("/api/display/start", api_display_start)
+    app.router.add_delete("/api/display/stop", api_display_stop)
+    app.router.add_get("/api/display/status", api_display_status)
 
     # 静态文件
     app.router.add_static("/static", FRONTEND_DIR, name="static")
@@ -761,6 +874,9 @@ async def on_cleanup(app):
     logger.info("关闭所有会话...")
     await receiver_manager.stop_all()
 
+    # 停止 HDMI 显示
+    await _stop_display()
+
     # 停止 mDNS 服务
     try:
         stop_mdns()
@@ -771,7 +887,7 @@ async def on_cleanup(app):
 # ========================================
 # 主函数
 # ========================================
-def main():
+async def main():
     local_ip = get_local_ip()
     http_port = config.http_port
     ws_port = config.ws_port
@@ -815,8 +931,22 @@ def main():
         ssl_ctx.load_cert_chain(str(ssl_crt), str(ssl_key))
         print("[SSL] HTTPS 已启用")
         print("")
-    web.run_app(app, host=config.server_host, port=http_port, ssl_context=ssl_ctx, print=None)
+
+    # 同时监听 HTTP 端口 (config.ws_port) 供本地 HDMI 显示使用
+    runner = web.AppRunner(app)
+    await runner.setup()
+    sites = []
+    sites.append(web.TCPSite(runner, config.server_host, http_port, ssl_context=ssl_ctx))
+    sites.append(web.TCPSite(runner, config.server_host, config.ws_port, ssl_context=None))
+    print(f"[HTTP] 本地显示端口: http://localhost:{config.ws_port}")
+    for site in sites:
+        await site.start()
+    print("")
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

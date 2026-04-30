@@ -29,11 +29,7 @@
 <body>
   <h1>P2P 投屏</h1>
   <div class="devices">
-    <div class="row">
-      <input id="ipInput" placeholder="输入设备 IP" />
-      <button onclick="connectToIP()">连接</button>
-      <button onclick="discoverDevices()">扫描</button>
-    </div>
+    <button onclick="discoverDevices()">扫描设备</button>
     <div id="devList"></div>
   </div>
   <button id="btnStart" onclick="start()">开始投屏</button>
@@ -65,7 +61,7 @@ function connectToIP() {
 }
 
 async function discoverDevices() {
-  const btn = document.querySelector('.devices button:last-child');
+  const btn = document.querySelector('.devices button');
   btn.disabled = true; btn.textContent = '扫描中...';
   try {
     const resp = await fetch('/api/discover');

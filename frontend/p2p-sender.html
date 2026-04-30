@@ -7,18 +7,38 @@
   <style>
     * { margin:0; padding:0; box-sizing:border-box; }
     body { font-family:Arial,sans-serif; background:#1a1a2e; color:#fff; padding:2rem; text-align:center; }
-    button { padding:1rem 2rem; font-size:1.2rem; border:none; border-radius:8px; background:#6c5ce7; color:#fff; cursor:pointer; margin:1rem; }
+    button { padding:.7rem 1.4rem; font-size:1rem; border:none; border-radius:8px; background:#6c5ce7; color:#fff; cursor:pointer; margin:.3rem; }
     button:hover { background:#5a4bd1; }
     button:disabled { background:#444; cursor:not-allowed; }
+    input { padding:.6rem 1rem; font-size:1rem; border:1px solid #333; border-radius:8px; background:#16213e; color:#fff; width:260px; text-align:center; }
+    input::placeholder { color:#666; }
+    .devices { margin:1rem auto; text-align:left; max-width:500px; }
+    .devices h3 { font-size:.85rem; color:#888; margin-bottom:.5rem; }
+    .row { display:flex; align-items:center; justify-content:center; gap:.5rem; }
+    .dev-item { padding:.6rem 1rem; margin:.3rem 0; background:rgba(255,255,255,.08); border-radius:8px; cursor:pointer; display:flex; justify-content:space-between; align-items:center; transition:background .2s; }
+    .dev-item:hover { background:rgba(255,255,255,.15); }
+    .dev-item.active { background:rgba(108,92,231,.3); border:1px solid #6c5ce7; }
+    .dev-name { font-weight:bold; }
+    .dev-addr { font-size:.8rem; color:#aaa; }
     #log { text-align:left; background:rgba(0,0,0,.4); padding:1rem; margin-top:1rem; border-radius:8px; max-height:300px; overflow-y:auto; font-size:.85rem; color:#ccc; white-space:pre-wrap; }
     video { width:100%; max-width:960px; margin-top:1rem; border-radius:8px; display:none; background:#000; }
-    #sid { font-size:1.5rem; color:#a29bfe; margin:1rem 0; word-break:break-all; user-select:all; }
+    #sid { font-size:1.2rem; color:#a29bfe; margin:.5rem 0; word-break:break-all; user-select:all; }
+    #connInfo { font-size:.8rem; color:#555; margin:.2rem 0; }
   </style>
 </head>
 <body>
   <h1>P2P 投屏</h1>
+  <div class="devices">
+    <div class="row">
+      <input id="ipInput" placeholder="输入设备 IP" />
+      <button onclick="connectToIP()">连接</button>
+      <button onclick="discoverDevices()">扫描</button>
+    </div>
+    <div id="devList"></div>
+  </div>
   <button id="btnStart" onclick="start()">开始投屏</button>
   <button id="btnStop" onclick="stop()" style="display:none">停止</button>
+  <div id="connInfo"></div>
   <div id="sid"></div>
   <video id="video" autoplay playsinline muted></video>
   <div id="log"></div>
@@ -29,24 +49,82 @@ const logLine = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.
 
 let pc = null, ws = null, stream = null, sessionId = null;
 let stopped = false;
-const WS = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+let wsBase = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+
+function updateConnInfo() {
+  const h = wsBase.replace(/^[^:]+:\/\//, '');
+  document.getElementById('connInfo').textContent = '当前: ' + h;
+}
+updateConnInfo();
+
+function connectToIP() {
+  const ip = document.getElementById('ipInput').value.trim();
+  if (!ip) return;
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  switchDevice(proto + '//' + ip + ':8080');
+}
+
+async function discoverDevices() {
+  const btn = document.querySelector('.devices button:last-child');
+  btn.disabled = true; btn.textContent = '扫描中...';
+  try {
+    const resp = await fetch('/api/discover');
+    const data = await resp.json();
+    const list = document.getElementById('devList');
+    list.innerHTML = '';
+    if (!data.devices || data.devices.length === 0) {
+      list.innerHTML = '<div style="padding:.5rem;color:#666">未发现设备 (需安装 zeroconf)</div>';
+    } else {
+      data.devices.forEach(d => {
+        const item = document.createElement('div');
+        const isActive = wsBase.includes(d.host);
+        item.className = 'dev-item' + (isActive ? ' active' : '');
+        item.innerHTML = `<div><div class="dev-name">${d.name || d.id}</div><div class="dev-addr">${d.host}:${d.port}</div></div>`;
+        item.onclick = async () => {
+          const newBase = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + d.host + ':' + d.port;
+          if (wsBase !== newBase) {
+            await switchDevice(newBase);
+          }
+          start();
+        };
+        list.appendChild(item);
+      });
+    }
+  } catch(e) {
+    logLine('[!] 发现失败: ' + e);
+  } finally {
+    btn.disabled = false; btn.textContent = '扫描';
+  }
+}
+
+async function switchDevice(newBase) {
+  if (ws) { ws.close(); ws = null; }
+  wsBase = newBase;
+  logLine('[*] 切换设备: ' + newBase);
+  updateConnInfo();
+  document.querySelectorAll('.dev-item').forEach(el => el.classList.remove('active'));
+  try {
+    await connectWS();
+    setupWSHandler();
+    logLine('[*] 已连接');
+  } catch(e) {
+    logLine('[!] 连接失败: ' + e);
+  }
+}
 
 async function connectWS() {
   return new Promise((resolve, reject) => {
-    ws = new WebSocket(WS);
+    const url = wsBase + '/ws';
+    ws = new WebSocket(url);
     const timeout = setTimeout(() => { ws.close(); reject(new Error('WS 连接超时')); }, 10000);
-    ws.onopen = () => { clearTimeout(timeout); logLine('[*] WS 已连接'); resolve(); };
+    ws.onopen = () => { clearTimeout(timeout); logLine('[*] WS 已连接: ' + url); updateConnInfo(); resolve(); };
     ws.onerror = () => { clearTimeout(timeout); reject(new Error('WS 连接失败')); };
     ws.onclose = () => {
       logLine('[*] WS 断开');
       if (!stopped && stream) {
-        logLine('[*] 3秒后尝试重连...');
+        logLine('[*] 3秒后重连...');
         setTimeout(async () => {
-          try {
-            await connectWS();
-            setupWSHandler();
-            logLine('[*] WS 重连成功');
-          } catch(e) { logLine('[!] 重连失败: ' + e); }
+          try { await connectWS(); setupWSHandler(); } catch(e) { logLine('[!] 重连失败: ' + e); }
         }, 3000);
       }
     };
@@ -79,7 +157,8 @@ function setupWSHandler() {
 
 function setupPC() {
   if (pc) { try { pc.close(); } catch(e){} }
-  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });  pc.onicecandidate = (e) => {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  pc.onicecandidate = (e) => {
     if (!e.candidate) { logLine('[*] ICE 收集完成'); return; }
     logLine('[*] ICE: ' + e.candidate.candidate.substring(0,60));
     send({ t:'ice', s: sessionId, c: e.candidate.candidate, m: e.candidate.sdpMid, l: e.candidate.sdpMLineIndex });
@@ -93,7 +172,7 @@ function setupPC() {
 }
 
 async function createOffer() {
-  setupPC();  // Always create a new PC for fresh ICE gathering
+  setupPC();
   try {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -111,8 +190,10 @@ async function start() {
     document.getElementById('video').style.display = 'block';
     logLine('[*] 屏幕捕获成功');
 
-    await connectWS();
-    setupWSHandler();
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      await connectWS();
+      setupWSHandler();
+    }
 
     sessionId = 'p2p_' + Date.now().toString(36);
     document.getElementById('sid').textContent = sessionId;
@@ -121,7 +202,6 @@ async function start() {
 
     setupPC();
     await createOffer();
-
   } catch(e) { logLine('[!] 启动失败: ' + e); }
 }
 

@@ -274,28 +274,36 @@ async def api_set_volume(request):
 
 async def api_discover_devices(request):
     """GET /api/discover - 发现局域网内的投屏设备（mDNS）"""
+    logger.info("[api/discover] 收到发现请求")
     try:
-        from mdns_service import MDNSDiscovery
+        from mdns_service import MDNSDiscovery, HAS_ZEROCONF
+        logger.info("[api/discover] HAS_ZEROCONF=%s", HAS_ZEROCONF)
         discovery = MDNSDiscovery()
-        devices = await discovery.discover(timeout=2.0)
+        devices = await discovery.discover(timeout=3.0)
+        logger.info("[api/discover] 发现结果: %d 个设备", len(devices))
 
         # 转换为列表格式
-        device_list = [
-            {
+        device_list = []
+        for name, info in devices.items():
+            props = {}
+            for k, v in info.get("properties", {}).items():
+                props[k.decode() if isinstance(k, bytes) else k] = v.decode() if isinstance(v, bytes) else v
+            device_list.append({
                 "id": name,
                 "name": info["name"],
                 "host": info["host"],
                 "port": info["port"],
                 "url": f"http://{info['host']}:{info['port']}",
-                "properties": info.get("properties", {})
-            }
-            for name, info in devices.items()
-        ]
+                "properties": props
+            })
 
+        logger.info("[api/discover] 返回设备列表: %s", device_list)
         return web.json_response({"devices": device_list})
     except ImportError:
+        logger.error("[api/discover] ImportError: zeroconf 不可用")
         return web.json_response({"devices": [], "error": "mDNS not available"})
     except Exception as e:
+        logger.error("[api/discover] 异常: %s", e)
         return web.json_response({"devices": [], "error": str(e)})
 
 

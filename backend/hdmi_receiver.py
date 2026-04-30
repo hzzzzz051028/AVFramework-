@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Native HDMI display receiver - GStreamer WebRTC + kmssink (no browser)."""
-import asyncio, json, logging, os, sys
+import asyncio, json, logging, os, re, socket, subprocess, sys
 import websockets
 
 logging.basicConfig(level=logging.INFO, format="[HDMI] %(message)s")
@@ -29,6 +29,8 @@ class NativeReceiver:
         self.pending_msgs = []
         self.running = True
         self._decode_elems = []
+        self._ice_queue = []       # 缓存 set-remote-description 完成前的 ICE
+        self._remote_desc_set = False
 
     def _send_signaling(self, msg):
         if self.loop and not self.loop.is_closed():
@@ -169,6 +171,9 @@ class NativeReceiver:
                 sdp_text = sdp.as_text()
                 log.info("Answer created (len=%d), sending...", len(sdp_text))
                 self._send_signaling({"t": "answer", "s": self.sid, "sdp": sdp_text})
+                # set-remote-description 已完成（promise.wait 后），flush 缓存的 ICE
+                self._remote_desc_set = True
+                self._flush_ice_queue()
         try:
             promise.unref()
         except Exception:
@@ -178,7 +183,63 @@ class NativeReceiver:
         if not candidate:
             return
         log.info("Add ICE: %s", candidate[:60])
-        self.webrtc.emit("add-ice-candidate", int(sdp_mline_index), candidate)
+        if self._remote_desc_set:
+            self._do_add_ice(candidate, sdp_mid, sdp_mline_index)
+        else:
+            log.info("Queue ICE (remote desc not set yet)")
+            self._ice_queue.append((candidate, sdp_mid, sdp_mline_index))
+
+    def _resolve_mdns_candidate(self, candidate_str):
+        """解析 .local ICE candidate，替换为真实 IP"""
+        if '.local' not in candidate_str:
+            return candidate_str
+        # 从 candidate 字符串提取主机名: a=candidate:... <host> <port> ...
+        m = re.search(r'(a=candidate:\S+ +)(\S+\.local)( +\d+ )(.*)', candidate_str)
+        if not m:
+            log.warning("Cannot parse .local candidate: %s", candidate_str[:80])
+            return candidate_str
+        hostname = m.group(2)
+        try:
+            # 用 avahi-resolve 解析 .local 名
+            result = subprocess.run(
+                ["avahi-resolve-host-name", "-4", hostname],
+                capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout.strip():
+                ip = result.stdout.strip().split()[-1]
+                resolved = f"{m.group(1)}{ip}{m.group(3)}{m.group(4)}"
+                log.info("Resolved %s -> %s", hostname, ip)
+                return resolved
+        except Exception as e:
+            log.warning("avahi-resolve failed for %s: %s", hostname, e)
+        # fallback: Python socket
+        try:
+            infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
+            if infos:
+                ip = infos[0][4][0]
+                resolved = f"{m.group(1)}{ip}{m.group(3)}{m.group(4)}"
+                log.info("Resolved %s -> %s (socket)", hostname, ip)
+                return resolved
+        except Exception as e:
+            log.warning("socket resolve failed for %s: %s", hostname, e)
+        log.warning("Cannot resolve .local candidate, dropping: %s", candidate_str[:80])
+        return None
+
+    def _do_add_ice(self, candidate, sdp_mid, sdp_mline_index):
+        resolved = self._resolve_mdns_candidate(candidate)
+        if resolved is None:
+            return
+        try:
+            self.webrtc.emit("add-ice-candidate", int(sdp_mline_index), resolved)
+        except Exception as e:
+            log.warning("add-ice-candidate failed: %s", e)
+
+    def _flush_ice_queue(self):
+        if not self._ice_queue:
+            return
+        log.info("Flushing %d queued ICE candidates", len(self._ice_queue))
+        for candidate, sdp_mid, sdp_mline_index in self._ice_queue:
+            self._do_add_ice(candidate, sdp_mid, sdp_mline_index)
+        self._ice_queue.clear()
 
     async def _ws_loop(self):
         while self.running:

@@ -307,6 +307,107 @@ async def api_discover_devices(request):
         return web.json_response({"devices": [], "error": str(e)})
 
 
+async def api_system(request):
+    """GET /api/system - 系统监控指标 (CPU/内存/磁盘/温度/网络)"""
+    result = {}
+
+    # CPU load
+    try:
+        with open("/proc/loadavg") as f:
+            parts = f.read().strip().split()
+            result["cpu_load"] = [float(x) for x in parts[:3]]
+    except Exception:
+        result["cpu_load"] = [0, 0, 0]
+
+    # CPU usage (idle from /proc/stat)
+    try:
+        with open("/proc/stat") as f:
+            line = f.readline()
+            vals = list(map(int, line.split()[1:]))
+            idle = vals[3]
+            total = sum(vals)
+            result["cpu_idle"] = idle
+            result["cpu_total"] = total
+    except Exception:
+        result["cpu_idle"] = 0
+        result["cpu_total"] = 1
+
+    # Temperature
+    temps = {}
+    thermal_base = "/sys/class/thermal"
+    try:
+        for zone in sorted(os.listdir(thermal_base)):
+            if not zone.startswith("thermal_zone"):
+                continue
+            type_path = os.path.join(thermal_base, zone, "type")
+            temp_path = os.path.join(thermal_base, zone, "temp")
+            try:
+                with open(type_path) as f:
+                    name = f.read().strip()
+                with open(temp_path) as f:
+                    temp_c = int(f.read().strip()) / 1000.0
+                temps[name] = round(temp_c, 1)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    result["temperatures"] = temps
+
+    # Memory
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                k, v = line.split(":")
+                meminfo[k.strip()] = int(v.strip().split()[0])
+        total = meminfo.get("MemTotal", 1)
+        available = meminfo.get("MemAvailable", meminfo.get("MemFree", 0))
+        used = total - available
+        result["memory"] = {
+            "total_mb": round(total / 1024),
+            "used_mb": round(used / 1024),
+            "percent": round(used / total * 100, 1),
+        }
+    except Exception:
+        result["memory"] = {"total_mb": 0, "used_mb": 0, "percent": 0}
+
+    # Disk
+    try:
+        st = os.statvfs("/")
+        total_b = st.f_blocks * st.f_frsize
+        free_b = st.f_bfree * st.f_frsize
+        used_b = total_b - free_b
+        result["disk"] = {
+            "total_gb": round(total_b / (1024**3), 1),
+            "used_gb": round(used_b / (1024**3), 1),
+            "percent": round(used_b / total_b * 100, 1),
+        }
+    except Exception:
+        result["disk"] = {"total_gb": 0, "used_gb": 0, "percent": 0}
+
+    # Network
+    result["ip"] = get_local_ip()
+
+    # Uptime
+    result["service_uptime"] = _get_uptime()
+
+    # Display process
+    global _display_process
+    if _display_process and _display_process.poll() is None:
+        result["display"] = {"running": True, "pid": _display_process.pid, "room": _display_room_id}
+    else:
+        result["display"] = {"running": False}
+
+    # Active rooms
+    room_list = []
+    for rid, room in rooms.items():
+        room_list.append({"id": rid, "viewers": len(room.viewers), "has_sender": room.sender is not None})
+    result["rooms"] = room_list
+    result["room_count"] = len(rooms)
+
+    return web.json_response(result)
+
+
 async def health_check(request):
     """GET /health"""
     return web.json_response({
@@ -821,6 +922,14 @@ async def api_display_status(request):
     return web.json_response({"running": False})
 
 
+async def status_html_handler(request):
+    """系统监控看板"""
+    path = FRONTEND_DIR / "status.html"
+    if path.exists():
+        return web.FileResponse(path)
+    return web.Response(text="Status page not found", status=404)
+
+
 async def p2p_view_handler(request):
     """P2P 观看端 (minimal)"""
     path = FRONTEND_DIR / "p2p-view.html"
@@ -860,6 +969,7 @@ def create_app():
     app.router.add_put("/api/display/layout", api_set_layout)
     app.router.add_put("/api/audio/master", api_set_volume)
     app.router.add_get("/api/discover", api_discover_devices)
+    app.router.add_get("/api/system", api_system)
 
     # 健康检查
     app.router.add_get("/health", health_check)
@@ -877,6 +987,7 @@ def create_app():
     app.router.add_get("/dashboard.html", dashboard_html_handler)
     app.router.add_get("/terminal-view.html", terminal_view_handler)
     app.router.add_get("/p2p-sender.html", p2p_sender_handler)
+    app.router.add_get("/status.html", status_html_handler)
     app.router.add_get("/p2p-view.html", p2p_view_handler)
     app.router.add_get("/display.html", display_handler)
 

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RK3588 状态监控</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:Arial,sans-serif; background:#1a1a2e; color:#fff; padding:1.5rem; max-width:800px; margin:0 auto; }
+    h1 { font-size:1.4rem; margin-bottom:.2rem; }
+    .header { color:#888; font-size:.85rem; margin-bottom:1.2rem; display:flex; justify-content:space-between; flex-wrap:wrap; gap:.3rem; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:1rem; margin-bottom:1rem; }
+    .card { background:rgba(255,255,255,.06); border-radius:10px; padding:1rem; }
+    .card h3 { font-size:.75rem; color:#888; margin-bottom:.5rem; text-transform:uppercase; letter-spacing:.05em; }
+    .big { font-size:2rem; font-weight:bold; color:#a29bfe; }
+    .sub { font-size:.8rem; color:#666; margin-top:.2rem; }
+    .bar-wrap { background:rgba(255,255,255,.1); border-radius:6px; height:8px; margin-top:.6rem; overflow:hidden; }
+    .bar { height:100%; border-radius:6px; transition:width .5s, background .5s; }
+    .bar.ok { background:#6c5ce7; }
+    .bar.warn { background:#e17055; }
+    .bar.danger { background:#d63031; }
+
+    .temps { margin-bottom:1rem; }
+    .temps .card h3 { margin-bottom:.6rem; }
+    .temp-row { display:flex; justify-content:space-between; padding:.25rem 0; font-size:.85rem; border-bottom:1px solid rgba(255,255,255,.04); }
+    .temp-row:last-child { border:none; }
+    .temp-name { color:#aaa; }
+    .temp-val { font-weight:bold; }
+    .temp-val.warm { color:#e17055; }
+    .temp-val.hot { color:#d63031; }
+
+    .cast-info { margin-bottom:1rem; }
+    .cast-info .card h3 { margin-bottom:.6rem; }
+    .info-row { display:flex; justify-content:space-between; padding:.3rem 0; font-size:.85rem; }
+    .info-label { color:#aaa; }
+    .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:.4rem; vertical-align:middle; }
+    .status-dot.on { background:#00b894; box-shadow:0 0 6px #00b894; }
+    .status-dot.off { background:#636e72; }
+
+    .rooms { margin-bottom:1rem; }
+    .rooms .card h3 { margin-bottom:.6rem; }
+    .room-item { padding:.3rem 0; font-size:.8rem; color:#aaa; }
+    .room-item span { color:#a29bfe; font-family:monospace; }
+
+    #error { color:#d63031; font-size:.85rem; margin-bottom:1rem; display:none; }
+  </style>
+</head>
+<body>
+  <h1>RK3588 状态监控</h1>
+  <div class="header">
+    <span id="ipAddr">--</span>
+    <span id="uptime">服务运行: --</span>
+  </div>
+  <div id="error"></div>
+
+  <div class="grid">
+    <div class="card">
+      <h3>CPU 负载 (1/5/15 min)</h3>
+      <div class="big" id="cpuLoad">--</div>
+      <div class="sub" id="cpuCores"></div>
+    </div>
+    <div class="card">
+      <h3>内存</h3>
+      <div class="big" id="memPercent">--%</div>
+      <div class="sub" id="memDetail"></div>
+      <div class="bar-wrap"><div class="bar ok" id="memBar" style="width:0%"></div></div>
+    </div>
+    <div class="card">
+      <h3>磁盘</h3>
+      <div class="big" id="diskPercent">--%</div>
+      <div class="sub" id="diskDetail"></div>
+      <div class="bar-wrap"><div class="bar ok" id="diskBar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <div class="temps">
+    <div class="card">
+      <h3>温度 (°C)</h3>
+      <div id="tempList"></div>
+    </div>
+  </div>
+
+  <div class="cast-info">
+    <div class="card">
+      <h3>投屏状态</h3>
+      <div class="info-row"><span class="info-label">HDMI 输出</span><span id="dispStatus">--</span></div>
+      <div class="info-row"><span class="info-label">活跃会话</span><span id="roomCount">0</span></div>
+      <div id="roomList"></div>
+    </div>
+  </div>
+
+<script>
+const $ = id => document.getElementById(id);
+let prevCpu = null;
+
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  return d > 0 ? `${d}天 ${h}时 ${m}分` : h > 0 ? `${h}时 ${m}分` : `${m}分`;
+}
+
+function barClass(pct) { return pct >= 85 ? 'danger' : pct >= 70 ? 'warn' : 'ok'; }
+
+function tempClass(t) { return t >= 85 ? 'hot' : t >= 70 ? 'warm' : ''; }
+
+const ZONE_ORDER = ['soc-thermal','bigcore0','bigcore1','littlecore','center','gpu','npu'];
+
+async function refresh() {
+  try {
+    const resp = await fetch('/api/system');
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const d = await resp.json();
+    $('error').style.display = 'none';
+
+    // Header
+    $('ipAddr').textContent = d.ip;
+    $('uptime').textContent = '服务运行: ' + fmtUptime(d.service_uptime);
+
+    // CPU
+    if (d.cpu_load) $('cpuLoad').textContent = d.cpu_load.map(v => v.toFixed(2)).join(' / ');
+    if (d.cpu_idle !== undefined && prevCpu) {
+      const dIdle = d.cpu_idle - prevCpu.idle;
+      const dTotal = d.cpu_total - prevCpu.total;
+      if (dTotal > 0) {
+        const pct = (1 - dIdle/dTotal) * 100;
+        $('cpuCores').textContent = '使用率: ' + pct.toFixed(1) + '%';
+      }
+    }
+    prevCpu = { idle: d.cpu_idle, total: d.cpu_total };
+
+    // Memory
+    if (d.memory) {
+      const m = d.memory;
+      $('memPercent').textContent = m.percent + '%';
+      $('memDetail').textContent = m.used_mb + ' / ' + m.total_mb + ' MB';
+      const bar = $('memBar');
+      bar.style.width = m.percent + '%';
+      bar.className = 'bar ' + barClass(m.percent);
+    }
+
+    // Disk
+    if (d.disk) {
+      const dk = d.disk;
+      $('diskPercent').textContent = dk.percent + '%';
+      $('diskDetail').textContent = dk.used_gb + ' / ' + dk.total_gb + ' GB';
+      const bar = $('diskBar');
+      bar.style.width = dk.percent + '%';
+      bar.className = 'bar ' + barClass(dk.percent);
+    }
+
+    // Temperatures
+    if (d.temperatures) {
+      let html = '';
+      const zones = Object.keys(d.temperatures);
+      const sorted = zones.sort((a,b) => ZONE_ORDER.indexOf(a) - ZONE_ORDER.indexOf(b));
+      for (const z of sorted) {
+        const t = d.temperatures[z];
+        html += `<div class="temp-row"><span class="temp-name">${z}</span><span class="temp-val ${tempClass(t)}">${t}°C</span></div>`;
+      }
+      $('tempList').innerHTML = html;
+    }
+
+    // Display
+    if (d.display) {
+      if (d.display.running) {
+        $('dispStatus').innerHTML = `<span class="status-dot on"></span>运行中 (PID ${d.display.pid}${d.display.room ? ', ' + d.display.room : ''})`;
+      } else {
+        $('dispStatus').innerHTML = `<span class="status-dot off"></span>未运行`;
+      }
+    }
+
+    // Rooms
+    $('roomCount').textContent = d.room_count;
+    let rhtml = '';
+    if (d.rooms) {
+      for (const r of d.rooms) {
+        rhtml += `<div class="room-item">${r.has_sender ? '📤' : '—'} <span>${r.id}</span> viewers=${r.viewers}</div>`;
+      }
+    }
+    $('roomList').innerHTML = rhtml;
+
+  } catch(e) {
+    $('error').textContent = '获取数据失败: ' + e;
+    $('error').style.display = 'block';
+  }
+}
+
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

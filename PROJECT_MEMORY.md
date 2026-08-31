@@ -508,6 +508,17 @@ decoder.mode = software | auto | hardware
 - 影响：通过 `https://192.168.50.1` 或 `https://192.168.1.109` 访问时，主机名/IP 与证书不匹配；浏览器可能允许页面例外，但 WSS/Fetch 仍可能失败，符合此前 `WS 超时` 与 `Failed to fetch` 现象。
 - 下一步：生成带 `192.168.50.1`、`192.168.1.109`、`orangepi5pro` SAN 的本地 CA/服务器证书，并在测试电脑安装 CA；之后重新验证纯浏览器直投。
 
+### 当前环境状态
+
+- 用户当前无 RK3588 板端环境。暂停所有 AP、证书部署、HDMI/KMS 和实机性能验证；保持本机 Mock/桌面测试与代码迭代。
+- 板端恢复后优先：部署补齐 Authority/Subject Key Identifier 的新 TLS 证书、信任本地 CA、验证 `https://192.168.50.1` + WSS 纯浏览器投屏。
+
+### 2026-08-31 — 无板子环境验证
+
+- 自动化：12 项 pytest、`compileall` 均通过。
+- 桌面媒体：本机 Homebrew GStreamer 1.28.6 在加载环境变量后通过诊断；`nice`、`webrtcbin`、H.264 depay/parser/decoder、`fakesink` 均可用。未加载环境变量时 PyGObject 无法定位 Homebrew GLib 动态库。
+- 浏览器 Mock E2E：启动 `tools/run_mock_server.py` 后，浏览器 Canvas 测试媒体成功连接 WebSocket、创建 Offer/ICE；`/api/receiver/status` 确认 MockReceiver 进入 `playing`；停止后页面显示“已停止”，active session 清空。
+
 ### 2026-08-31 — 开始实现 HDMI 待机引导画面
 
 - 目标：无投屏会话时，在 HDMI 上显示设备说明、Wi-Fi SSID/密码、访问地址和 Wi-Fi 二维码。

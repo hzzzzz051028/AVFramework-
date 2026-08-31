@@ -519,6 +519,13 @@ decoder.mode = software | auto | hardware
 - 桌面媒体：本机 Homebrew GStreamer 1.28.6 在加载环境变量后通过诊断；`nice`、`webrtcbin`、H.264 depay/parser/decoder、`fakesink` 均可用。未加载环境变量时 PyGObject 无法定位 Homebrew GLib 动态库。
 - 浏览器 Mock E2E：启动 `tools/run_mock_server.py` 后，浏览器 Canvas 测试媒体成功连接 WebSocket、创建 Offer/ICE；`/api/receiver/status` 确认 MockReceiver 进入 `playing`；停止后页面显示“已停止”，active session 清空。
 
+### 2026-08-31 — 无硬件媒体管道模拟
+
+- 范围：不模拟 AP、DHCP 或 HDMI，仅验证媒体管道。
+- 新增：`tools/check_media_pipeline.py`，使用本机 GStreamer `videotestsrc → videoconvert → fakesink` 以及 `videotestsrc → x264enc → h264parse → avdec_h264 → fakesink` 进行 headless 实帧检查。
+- 实测：1280×720/30fps、2 秒运行，raw 与 H.264 编解码回环均处理 60 帧（29.9fps）；pytest 12 项通过。
+- 结论：发送端默认 H.264 与软件解码回退的媒体处理逻辑可继续无板子开发；MPP、KMS/HDMI 仍待板端验收。
+
 ### 2026-08-31 — 开始实现 HDMI 待机引导画面
 
 - 目标：无投屏会话时，在 HDMI 上显示设备说明、Wi-Fi SSID/密码、访问地址和 Wi-Fi 二维码。

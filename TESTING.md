@@ -206,3 +206,18 @@ export GST_REGISTRY=/tmp/gst-registry-wireless.bin
 ```
 
 然后用 Chrome/Edge 打开脚本输出的 `Real screen` 地址。页面运行在 `localhost`，屏幕采集可用，信令通过 `ws://192.168.1.109:8081/ws` 连接板端。
+
+## 无硬件媒体管道模拟
+
+使用本机 GStreamer 运行真实的 raw 视频和 H.264 编码/解码回环，输出固定为 `fakesink`，不需要 RK3588、显示器或网络：
+
+```bash
+export PATH=/Users/hhz/hb/bin:$PATH
+export GI_TYPELIB_PATH=/Users/hhz/hb/lib/girepository-1.0
+export DYLD_FALLBACK_LIBRARY_PATH=/Users/hhz/hb/lib:/Users/hhz/hb/opt/libffi/lib
+export GST_PLUGIN_SYSTEM_PATH_1_0=/Users/hhz/hb/lib/gstreamer-1.0
+export GST_PLUGIN_PATH=/Users/hhz/hb/lib/gstreamer-1.0
+.venv/bin/python tools/check_media_pipeline.py
+```
+
+该测试覆盖媒体帧产生、转换、H.264 编码、解析、软件解码和 sink 消费；不模拟 AP 或 HDMI/KMS。

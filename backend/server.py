@@ -439,6 +439,20 @@ async def server_info(request):
     })
 
 
+async def api_device_info(request):
+    """GET /api/device-info - onboarding information for senders/standby UI."""
+    return web.json_response({
+        "name": config.device_name,
+        "ssid": config.ap_ssid,
+        "password": config.ap_password,
+        "address": config.ap_address,
+        "https_url": f"https://{config.ap_address}:{config.http_port}",
+        "ws_url": f"ws://{config.ap_address}:{config.ws_port}/ws",
+        "active_session": _display_room_id,
+        "available": _display_process is None or _display_process.poll() is not None,
+    })
+
+
 # ========================================
 # WebSocket (向后兼容)
 # ========================================
@@ -1042,6 +1056,7 @@ def create_app(receiver_supervisor=None):
     # 健康检查
     app.router.add_get("/health", health_check)
     app.router.add_get("/info", server_info)
+    app.router.add_get("/api/device-info", api_device_info)
 
     # WebSocket
     app.router.add_get("/ws", ws_handler)

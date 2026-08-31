@@ -512,6 +512,7 @@ decoder.mode = software | auto | hardware
 - 第二轮修复：二维码改为 PNG Base64 内嵌到 SVG；启动待机渲染前主动向 `/dev/tty1` 写入终端清屏序列，并继续停用 `getty@tty1`，用于清除历史 shell 内容。待用户复核物理屏幕是否仍有 fbcon 覆盖。
 - 生命周期接入：新增 `scripts/screencast-standby.service`，systemd 开机自动运行待机渲染；`server.py` 在投屏开始时停止该服务，投屏停止时恢复；部署脚本自动安装/启用该服务。板端当前 `screencast` 与 `screencast-standby` 均 active，健康接口正常。`getty@tty1` 已 disabled。
 - 用户验收：用户确认待机画面已不再被 shell 覆盖，当前版本暂作为稳定基线冻结；后续进入功能迭代。
+- 功能迭代 1：新增 `network` 配置项（设备名、AP SSID/密码/地址）及 `GET /api/device-info`，统一向待机页、客户端和管理端提供 onboarding 信息；新增接口测试，12 项 pytest 全部通过；板端 API 已部署并验证可返回 `192.168.50.1` 的 HTTPS/WS 地址。
 
 ### 2026-08-31 — 产品目标调整为单设备无线投屏网关
 

@@ -36,6 +36,12 @@ DEFAULTS = {
         "hw_scale": True,
         "drm_connector": "auto",
     },
+    "network": {
+        "device_name": "RK Wireless Display",
+        "ap_ssid": "RK-Screencast",
+        "ap_password": "RKcast2026",
+        "ap_address": "192.168.50.1",
+    },
 }
 
 
@@ -144,6 +150,22 @@ class Config:
     @property
     def drm_connector(self):
         return self.get("hardware", "drm_connector")
+
+    @property
+    def device_name(self):
+        return self.get("network", "device_name")
+
+    @property
+    def ap_ssid(self):
+        return self.get("network", "ap_ssid")
+
+    @property
+    def ap_password(self):
+        return self.get("network", "ap_password")
+
+    @property
+    def ap_address(self):
+        return self.get("network", "ap_address")
 
 
 config = Config()

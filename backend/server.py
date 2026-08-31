@@ -23,6 +23,7 @@ from gst.receiver import StreamReceiverManager, HAS_GST
 from gst.compositor import CompositorManager
 from gst.audio_mixer import AudioManager
 from mdns_service import start_mdns, stop_mdns
+from receivers import ReceiverSupervisor
 
 # ========================================
 # 日志
@@ -33,6 +34,8 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S',
 )
 logger = logging.getLogger(__name__)
+
+RECEIVER_SUPERVISOR_KEY = web.AppKey("receiver_supervisor", ReceiverSupervisor)
 
 # ========================================
 # 路径
@@ -73,6 +76,7 @@ rooms = {}              # room_id → Room
 ws_to_client = {}       # id(ws) → client_id
 client_to_ws = {}       # client_id → ws
 client_to_room = {}     # client_id → room_id
+client_to_peer = {}     # client_id → remote IP/address
 _next_client_id = [0]
 
 
@@ -94,11 +98,12 @@ def _get_ws(client_id):
     return ws
 
 
-def _register_ws(ws):
+def _register_ws(ws, peer="unknown"):
     """为新连接分配 client_id 并注册映射"""
     cid = _alloc_client_id()
     ws_to_client[id(ws)] = cid
     client_to_ws[cid] = ws
+    client_to_peer[cid] = peer
     return cid
 
 
@@ -109,6 +114,7 @@ def _unregister_ws(ws):
     if cid is not None:
         client_to_ws.pop(cid, None)
         client_to_room.pop(cid, None)
+        client_to_peer.pop(cid, None)
     return cid
 
 
@@ -441,8 +447,9 @@ async def ws_handler(request):
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
-    cid = _register_ws(ws)
     peer = request.remote or "unknown"
+    cid = _register_ws(ws, peer)
+    receiver_supervisor = request.app.get(RECEIVER_SUPERVISOR_KEY)
     print(f"[WS] 连接: cid={cid} from {peer}", flush=True)
     logger.info("[WS] 客户端连接: cid=%s from %s", cid, peer)
 
@@ -451,13 +458,13 @@ async def ws_handler(request):
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    await handle_ws_message(cid, data)
+                    await handle_ws_message(cid, data, receiver_supervisor)
                 except json.JSONDecodeError:
                     await ws.send_json({"type": "error", "message": "invalid json"})
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error("[WS] 错误: %s", ws.exception())
     finally:
-        handle_ws_disconnect(ws, cid)
+        await handle_ws_disconnect(ws, cid, receiver_supervisor)
         logger.info("[WS] 客户端断开: cid=%s", cid)
 
     return ws
@@ -488,7 +495,7 @@ def _msg_for(fmt, t_short, t_long, sid, **kw):
     return _make_long(t_long, sid, **kw)
 
 
-async def handle_ws_message(cid, data):
+async def handle_ws_message(cid, data, receiver_supervisor=None):
     """处理 WebSocket 消息 - 同时支持 long 和 short 两种消息格式"""
     fmt = _detect_format(data)
     if fmt == "short":
@@ -566,12 +573,8 @@ async def handle_ws_message(cid, data):
         room.viewers[cid] = fmt
         client_to_room[cid] = sid
         # 告诉 viewer sender 的真实 IP (用于替换 mDNS candidates)
-        sender_ws = _get_ws(room.sender)
-        sender_ip = ""
-        if sender_ws:
-            r = sender_ws.remote
-            sender_ip = r[0] if isinstance(r, tuple) else str(r).split(":")[0]
-        print(f"[DEBUG] sender_ws={sender_ws} remote={sender_ws.remote if sender_ws else None} sender_ip={sender_ip}", flush=True)
+        sender_ip = client_to_peer.get(room.sender, "")
+        print(f"[DEBUG] sender={room.sender} sender_ip={sender_ip}", flush=True)
         await _send_to(cid, _make_short("reg_ok", sid, sender_ip=sender_ip))
         # 转发缓存的 ICE candidates 给新 viewer
         for ice_pair in room.pending_ice:
@@ -594,7 +597,14 @@ async def handle_ws_message(cid, data):
         client_to_room[cid] = sid
         # Auto-start HDMI display for new sender
         if is_new:
-            asyncio.ensure_future(_auto_start_display(sid))
+            if receiver_supervisor is not None:
+                await receiver_supervisor.start(
+                    sid,
+                    f"ws://127.0.0.1:{config.ws_port}/ws",
+                    {"codec": config.preferred_codec},
+                )
+            else:
+                asyncio.ensure_future(_auto_start_display(sid))
         sdp = data.get("sdp", "")
         offer_msgs = {
             "short": _make_short("offer", sid, sdp=sdp),
@@ -654,18 +664,25 @@ async def handle_ws_message(cid, data):
             for vcid, vfmt in list(room.viewers.items()):
                 await _send_to(vcid, _msg_for(vfmt, "stopped", "stopped", sid))
             # Auto-stop HDMI display
-            if _display_room_id == sid:
+            if receiver_supervisor is not None:
+                await receiver_supervisor.stop(sid)
+            elif _display_room_id == sid:
                 asyncio.ensure_future(_stop_display())
             room.sender = None
             room.pending_offer = {}
             room.pending_ice = []
+            # 主动 stop 后该连接已不再属于房间。否则 WebSocket 随后关闭时，
+            # 会因为 room.sender 已清空而被误当成 viewer 再清理一次。
+            client_to_room.pop(cid, None)
+            if not room.viewers:
+                rooms.pop(sid, None)
             print(f"[ROOM] sender 停止: room={sid}", flush=True)
         return
 
     logger.warning("[WS] 未知消息类型: %s", msg_type)
 
 
-def handle_ws_disconnect(ws, cid):
+async def handle_ws_disconnect(ws, cid, receiver_supervisor=None):
     """清理断开连接"""
     # WHEP 会话清理
     session_ids = ws_sessions.pop(cid, set())
@@ -682,7 +699,9 @@ def handle_ws_disconnect(ws, cid):
                     msg = _msg_for(vfmt, "stopped", "stopped", room_id)
                     asyncio.ensure_future(_send_to(vcid, msg))
                 # Auto-stop HDMI display on sender disconnect
-                if _display_room_id == room_id:
+                if receiver_supervisor is not None:
+                    await receiver_supervisor.stop(room_id)
+                elif _display_room_id == room_id:
                     asyncio.ensure_future(_stop_display())
                 room.sender = None
                 room.pending_offer = {}
@@ -811,6 +830,17 @@ _display_process = None
 _display_room_id = None
 
 
+def _control_standby(action):
+    """Start/stop the persistent HDMI standby renderer when installed."""
+    try:
+        subprocess.run(
+            ["systemctl", action, "screencast-standby.service"],
+            check=False, timeout=4, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+
 async def display_handler(request):
     """HDMI 显示页面"""
     path = FRONTEND_DIR / "display.html"
@@ -831,7 +861,8 @@ async def api_display_start(request):
     if not sid:
         return web.json_response({"error": "missing session_id"}, status=400)
 
-    await _stop_display()
+    await _stop_display(restore_standby=False)
+    _control_standby("stop")
 
     # 使用纯 HTTP 端口的 WebSocket
     ws_url = f"ws://localhost:{config.ws_port}/ws"
@@ -861,7 +892,7 @@ async def api_display_start(request):
         return web.json_response({"error": str(e)}, status=500)
 
 
-async def _stop_display():
+async def _stop_display(restore_standby=True):
     """停止 HDMI 显示进程"""
     global _display_process, _display_room_id
 
@@ -882,15 +913,19 @@ async def _stop_display():
         logger.info("[DISPLAY] stopped pid=%d room=%s", pid, _display_room_id)
     _display_process = None
     _display_room_id = None
+    if restore_standby:
+        _control_standby("start")
 
 
 async def _auto_start_display(sid):
     """Auto-start HDMI display when sender begins sharing."""
     global _display_process, _display_room_id
 
+    _control_standby("stop")
+
     if _display_process and _display_process.poll() is None:
         logger.info("[DISPLAY] stopping old display for new session %s", sid)
-        await _stop_display()
+        await _stop_display(restore_standby=False)
 
     ws_url = f"ws://localhost:{config.ws_port}/ws"
     script = str(Path(__file__).resolve().parent / "hdmi_receiver.py")
@@ -909,7 +944,7 @@ async def _auto_start_display(sid):
 
 async def api_display_stop(request):
     """DELETE /api/display/stop - 停止 HDMI 显示"""
-    await _stop_display()
+    await _stop_display(restore_standby=True)
     return web.json_response({"status": "stopped"})
 
 
@@ -920,6 +955,36 @@ async def api_display_status(request):
         return web.json_response({"running": True, "pid": _display_process.pid})
     _display_process = None
     return web.json_response({"running": False})
+
+
+async def api_receiver_status(request):
+    """GET /api/receiver/status - 查询统一Receiver生命周期状态"""
+    receiver_supervisor = request.app.get(RECEIVER_SUPERVISOR_KEY)
+    if receiver_supervisor is None:
+        return web.json_response({
+            "configured": False,
+            "mode": "legacy",
+            "active_session_id": _display_room_id,
+            "session": None,
+        })
+
+    requested_session = request.query.get("session_id")
+    snapshot = receiver_supervisor.status(requested_session)
+    session = None
+    if snapshot is not None:
+        session = {
+            "session_id": snapshot.session_id,
+            "state": snapshot.state.value,
+            "backend": snapshot.backend,
+            "details": dict(snapshot.details),
+        }
+
+    return web.json_response({
+        "configured": True,
+        "mode": "supervised",
+        "active_session_id": receiver_supervisor.active_session_id,
+        "session": session,
+    })
 
 
 async def status_html_handler(request):
@@ -956,8 +1021,11 @@ def _get_uptime():
     return int(time.time() - _start_time)
 
 
-def create_app():
+def create_app(receiver_supervisor=None):
     app = web.Application()
+
+    if receiver_supervisor is not None:
+        app[RECEIVER_SUPERVISOR_KEY] = receiver_supervisor
 
     # REST API (WHEP)
     app.router.add_post("/api/sessions", whep_create_session)
@@ -995,6 +1063,7 @@ def create_app():
     app.router.add_post("/api/display/start", api_display_start)
     app.router.add_delete("/api/display/stop", api_display_stop)
     app.router.add_get("/api/display/status", api_display_status)
+    app.router.add_get("/api/receiver/status", api_receiver_status)
 
     # 静态文件
     app.router.add_static("/static", FRONTEND_DIR, name="static")
@@ -1028,8 +1097,12 @@ async def on_cleanup(app):
     logger.info("关闭所有会话...")
     await receiver_manager.stop_all()
 
+    receiver_supervisor = app.get(RECEIVER_SUPERVISOR_KEY)
+    if receiver_supervisor is not None:
+        await receiver_supervisor.stop_all()
+
     # 停止 HDMI 显示
-    await _stop_display()
+    await _stop_display(restore_standby=False)
 
     # 停止 mDNS 服务
     try:

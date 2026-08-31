@@ -45,11 +45,48 @@ const logLine = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.
 
 let pc = null, ws = null, stream = null, sessionId = null;
 let stopped = false;
-let wsBase = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+const pageParams = new URLSearchParams(location.search);
+let wsBase = pageParams.get('ws') || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
+const testMediaMode = pageParams.get('testMedia') === '1';
+let testMediaFrame = null;
+
+function createTestMediaStream() {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1280;
+  canvas.height = 720;
+  const ctx = canvas.getContext('2d');
+  const startedAt = performance.now();
+
+  const draw = (now) => {
+    const elapsed = (now - startedAt) / 1000;
+    const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+    gradient.addColorStop(0, '#1a1a2e');
+    gradient.addColorStop(1, '#6c5ce7');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#fff';
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 54px Arial';
+    ctx.fillText('WebRTC Test Media', canvas.width / 2, 310);
+    ctx.font = '32px monospace';
+    ctx.fillText(`${elapsed.toFixed(1)} s`, canvas.width / 2, 380);
+    testMediaFrame = requestAnimationFrame(draw);
+  };
+  testMediaFrame = requestAnimationFrame(draw);
+  return canvas.captureStream(30);
+}
+
+function stopTestMedia() {
+  if (testMediaFrame !== null) {
+    cancelAnimationFrame(testMediaFrame);
+    testMediaFrame = null;
+  }
+}
 
 function updateConnInfo() {
   const h = wsBase.replace(/^[^:]+:\/\//, '');
-  document.getElementById('connInfo').textContent = '当前: ' + h;
+  document.getElementById('connInfo').textContent =
+    '当前: ' + h + (testMediaMode ? ' · 测试媒体模式' : '');
 }
 updateConnInfo();
 
@@ -111,13 +148,14 @@ async function switchDevice(newBase) {
 async function connectWS() {
   return new Promise((resolve, reject) => {
     const url = wsBase + '/ws';
+    let opened = false;
     ws = new WebSocket(url);
     const timeout = setTimeout(() => { ws.close(); reject(new Error('WS 连接超时')); }, 10000);
-    ws.onopen = () => { clearTimeout(timeout); logLine('[*] WS 已连接: ' + url); updateConnInfo(); resolve(); };
+    ws.onopen = () => { opened = true; clearTimeout(timeout); logLine('[*] WS 已连接: ' + url); updateConnInfo(); resolve(); };
     ws.onerror = () => { clearTimeout(timeout); reject(new Error('WS 连接失败')); };
     ws.onclose = () => {
       logLine('[*] WS 断开');
-      if (!stopped && stream) {
+      if (opened && !stopped && stream) {
         logLine('[*] 3秒后重连...');
         setTimeout(async () => {
           try { await connectWS(); setupWSHandler(); } catch(e) { logLine('[!] 重连失败: ' + e); }
@@ -181,10 +219,15 @@ async function createOffer() {
 async function start() {
   stopped = false;
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: {cursor:'always'}, audio:true });
+    if (!testMediaMode && !window.isSecureContext) {
+      throw new Error('真实屏幕采集需要安全上下文，请使用 https://192.168.1.109:8080/p2p-sender.html；测试媒体可继续使用 HTTP');
+    }
+    stream = testMediaMode
+      ? createTestMediaStream()
+      : await navigator.mediaDevices.getDisplayMedia({ video: {cursor:'always'}, audio:true });
     document.getElementById('video').srcObject = stream;
     document.getElementById('video').style.display = 'block';
-    logLine('[*] 屏幕捕获成功');
+    logLine(testMediaMode ? '[*] 合成测试画面已启动' : '[*] 屏幕捕获成功');
 
     if (!ws || ws.readyState === WebSocket.CLOSED) {
       await connectWS();
@@ -208,6 +251,7 @@ function stop() {
   send({ t:'stop', s: sessionId });
   if (pc) { pc.close(); pc = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  stopTestMedia();
   if (ws) { ws.close(); ws = null; }
   document.getElementById('video').style.display = 'none';
   document.getElementById('btnStart').style.display = 'inline-block';

@@ -14,8 +14,11 @@ from gi.repository import Gst, GstWebRTC, GstSdp
 
 Gst.init(None)
 
-DISPLAY_W, DISPLAY_H = 1024, 600
-PLANE_ID = 71
+# Keep the known RK3588 baseline while allowing per-device overrides.  The
+# board may be connected to a different DRM output/mode during development.
+DISPLAY_W = int(os.environ.get("SCREENCAST_DISPLAY_WIDTH", "1024"))
+DISPLAY_H = int(os.environ.get("SCREENCAST_DISPLAY_HEIGHT", "600"))
+PLANE_ID = int(os.environ.get("SCREENCAST_KMS_PLANE_ID", "71"))
 
 
 class NativeReceiver:
@@ -31,6 +34,7 @@ class NativeReceiver:
         self._decode_elems = []
         self._ice_queue = []       # 缓存 set-remote-description 完成前的 ICE
         self._remote_desc_set = False
+        self._sender_ip = ""
 
     def _send_signaling(self, msg):
         if self.loop and not self.loop.is_closed():
@@ -43,7 +47,9 @@ class NativeReceiver:
 
     async def _async_send(self, msg):
         try:
-            if self.ws and not self.ws.closed:
+            # websockets 15 ClientConnection no longer exposes ``closed``;
+            # send and let the connection exception handle a concurrent close.
+            if self.ws:
                 await self.ws.send(json.dumps(msg))
         except Exception as e:
             log.warning("WS send failed: %s", e)
@@ -193,12 +199,21 @@ class NativeReceiver:
         """解析 .local ICE candidate，替换为真实 IP"""
         if '.local' not in candidate_str:
             return candidate_str
-        # 从 candidate 字符串提取主机名: a=candidate:... <host> <port> ...
-        m = re.search(r'(a=candidate:\S+ +)(\S+\.local)( +\d+ )(.*)', candidate_str)
-        if not m:
+        # 浏览器 candidate 可能带或不带 ``a=``，按字段定位 .local 主机名。
+        fields = candidate_str.split()
+        host_index = next(
+            (index for index, value in enumerate(fields) if value.endswith(".local")),
+            None,
+        )
+        if host_index is None:
             log.warning("Cannot parse .local candidate: %s", candidate_str[:80])
             return candidate_str
-        hostname = m.group(2)
+        hostname = fields[host_index]
+        if self._sender_ip:
+            fields[host_index] = self._sender_ip
+            resolved = " ".join(fields)
+            log.info("Resolved %s -> %s (sender peer)", hostname, self._sender_ip)
+            return resolved
         try:
             # 用 avahi-resolve 解析 .local 名
             result = subprocess.run(
@@ -206,7 +221,8 @@ class NativeReceiver:
                 capture_output=True, text=True, timeout=2)
             if result.returncode == 0 and result.stdout.strip():
                 ip = result.stdout.strip().split()[-1]
-                resolved = f"{m.group(1)}{ip}{m.group(3)}{m.group(4)}"
+                fields[host_index] = ip
+                resolved = " ".join(fields)
                 log.info("Resolved %s -> %s", hostname, ip)
                 return resolved
         except Exception as e:
@@ -216,7 +232,8 @@ class NativeReceiver:
             infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
             if infos:
                 ip = infos[0][4][0]
-                resolved = f"{m.group(1)}{ip}{m.group(3)}{m.group(4)}"
+                fields[host_index] = ip
+                resolved = " ".join(fields)
                 log.info("Resolved %s -> %s (socket)", hostname, ip)
                 return resolved
         except Exception as e:
@@ -270,6 +287,9 @@ class NativeReceiver:
                                 log.info("Session not ready, waiting 3s...")
                                 await asyncio.sleep(3)
                             break
+                        elif t == "reg_ok":
+                            self._sender_ip = d.get("sender_ip", "") or ""
+                            log.info("Sender peer address: %s", self._sender_ip)
                         elif t == "offer":
                             self._cleanup_decode_chain()
                             self._handle_offer(d["sdp"])

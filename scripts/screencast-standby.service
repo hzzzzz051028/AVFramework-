@@ -1,0 +1,21 @@
+[Unit]
+Description=Wireless Display HDMI Standby Screen
+After=local-fs.target systemd-udev-settle.service
+Before=screencast.service
+
+[Service]
+Type=simple
+Environment=SCREENCAST_DISPLAY_WIDTH=2560
+Environment=SCREENCAST_DISPLAY_HEIGHT=1440
+Environment=SCREENCAST_KMS_PLANE_ID=71
+Environment=SCREENCAST_WIFI_SSID=RK-Screencast
+Environment=SCREENCAST_WIFI_PASSWORD=RKcast2026
+Environment=SCREENCAST_ADDRESS=http://192.168.50.1:8080
+ExecStart=/usr/bin/python3 /opt/screencast/backend/standby_display.py
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

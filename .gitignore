@@ -46,6 +46,10 @@ logs/
 # Python
 __pycache__/
 *.pyc
+.venv/
+.pytest_cache/
+.coverage
+htmlcov/
 
 # Misc
 =12.0

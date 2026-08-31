@@ -23,7 +23,7 @@ try:
     from gi.repository import Gst, GstWebRTC, GstSdp, GLib
     Gst.init(None)
     HAS_GST = True
-except (ImportError, ValueError) as e:
+except Exception as e:
     HAS_GST = False
     logger.warning("GStreamer Python 绑定不可用, WebRTC 接收器将运行在模拟模式: %s", e)
 

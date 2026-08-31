@@ -502,6 +502,12 @@ decoder.mode = software | auto | hardware
 - 使用：运行 `.venv/bin/python tools/run_sender_dev.py`，用 Chrome/Edge 打开脚本输出的 Real screen 地址。
 - 验证：本地 11 项测试、compileall、git diff --check 通过；待板端恢复后执行真实屏幕投屏复测。
 
+### 2026-08-31 — 验证板端 HTTPS 证书是 WSS 卡点
+
+- 实测证书：`cert.pem` 为自签名证书，`CN=orangepi5pro`，没有 `Subject Alternative Name`（无 IP SAN）。
+- 影响：通过 `https://192.168.50.1` 或 `https://192.168.1.109` 访问时，主机名/IP 与证书不匹配；浏览器可能允许页面例外，但 WSS/Fetch 仍可能失败，符合此前 `WS 超时` 与 `Failed to fetch` 现象。
+- 下一步：生成带 `192.168.50.1`、`192.168.1.109`、`orangepi5pro` SAN 的本地 CA/服务器证书，并在测试电脑安装 CA；之后重新验证纯浏览器直投。
+
 ### 2026-08-31 — 开始实现 HDMI 待机引导画面
 
 - 目标：无投屏会话时，在 HDMI 上显示设备说明、Wi-Fi SSID/密码、访问地址和 Wi-Fi 二维码。

@@ -47,6 +47,7 @@ logs/
 __pycache__/
 *.pyc
 .venv/
+.local-certs/
 .pytest_cache/
 .coverage
 htmlcov/

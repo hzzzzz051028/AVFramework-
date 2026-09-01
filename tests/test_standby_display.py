@@ -26,3 +26,12 @@ def test_svg_fallback_contains_operational_information() -> None:
 
     for label in ("MEMORY", "TEMP", "UPTIME", "AP / LAN", "WEBRTC", "AIRPLAY", "MIRACAST"):
         assert label in renderer
+
+
+def test_display_console_blocks_both_getty_implementations_on_tty2() -> None:
+    setup = (ROOT / "scripts" / "configure_display_console.sh").read_text()
+    service = (ROOT / "scripts" / "screencast-display-console.service").read_text()
+
+    assert "getty@tty2.service autovt@tty2.service" in setup
+    assert "systemctl stop autovt@tty2.service" in setup
+    assert "mask --runtime autovt@tty2.service" in service

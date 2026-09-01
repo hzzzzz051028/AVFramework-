@@ -714,3 +714,9 @@ decoder.mode = software | auto | hardware
 - 板端验证：已部署 unit 与 fallback renderer；当前 `screencast-airplay-poc.service=active`、`screencast-standby.service=inactive`、marker 存在、无 standby renderer 子进程。手动 `systemctl start screencast-standby.service` 后仍保持 inactive，AirPlay 继续 active，互斥生效。未为验证而中断当前 AirPlay 会话；AirPlay 停止后的待机恢复在下一次正常结束时验证。
 - 待机信息：无 kiosk 的 SVG/KMS 页面增加真实 AP IP、有线 LAN IP、内存使用、最高温度、运行时长，以及 WebRTC/AirPlay/Miracast 和硬件解码能力提示；保留二维码、SSID、密码、投屏入口和投屏码。
 - 后续改进：UxPlay 官方 `-dacp <file>` 会仅在客户端连接期间创建文件，因此新增 `airplay_display_watch.sh` 与对应 systemd unit，目标是仅在该连接文件存在时创建 HDMI 独占标记并停止待机；文件消失则恢复待机。这样 AirPlay 常驻 mDNS 发现时仍可显示待机页，而不是服务启动即黑屏。源码和部署脚本已完成本地语法/测试验证；在本轮尝试部署前，板端 SSH 开始在认证后主动断开（端口仍可达），故尚未重启 AirPlay 实机验证该会话切换逻辑。
+
+### 2026-09-02 — 彻底移除 HDMI 上的 Focal tty2
+
+- 现象：即使 `getty@tty2.service` 已被 mask，HDMI 底层仍显示 `focal tty2`。板端查到实际进程是 `/sbin/agetty ... tty2`，所属 unit 为 `autovt@tty2.service`；这是与 `getty@tty2` 不同的 systemd 自动虚拟终端机制。
+- 修复：`configure_display_console.sh` 现在同时 mask `getty@tty2.service` 和 `autovt@tty2.service` 并停止后者；`screencast-display-console.service` 每次启动也会 runtime-mask/stop `autovt@tty2` 后再切到 tty2、清屏和隐藏光标。
+- 板端验证：已部署并立即 mask/stop；`screencast-display-console.service=active`、待机服务正常 active、两个 tty2 unit 均为 masked、没有 `agetty.*tty2` 进程、`fgconsole=2`。内核 cmdline 只保留 `console=ttyS2`，SSH 与串口维护路径未改动。

@@ -17,8 +17,11 @@ else
   printf '\nconsole=serial\n' >> "$ENV_FILE"
 fi
 
-# Do not let systemd create a login prompt on the dedicated display VT.
-systemctl mask getty@tty2.service >/dev/null 2>&1 || true
+# Do not let either getty implementation create a login prompt on the
+# dedicated display VT.  systemd's autovt helper is distinct from getty@ and
+# can otherwise recreate agetty whenever the display service switches to tty2.
+systemctl mask getty@tty2.service autovt@tty2.service >/dev/null 2>&1 || true
+systemctl stop autovt@tty2.service >/dev/null 2>&1 || true
 
 echo "HDMI text console disabled for next boot; serial console and SSH remain available."
 echo "Backup: ${ENV_FILE}.screencast-backup"

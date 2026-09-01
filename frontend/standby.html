@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>RK Cast · Wireless Display</title>
+  <link rel="stylesheet" href="/static/standby.css">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true">
+    <div class="ambient__slide ambient__slide--one"></div>
+    <div class="ambient__slide ambient__slide--two"></div>
+    <div class="ambient__slide ambient__slide--three"></div>
+    <div class="ambient__veil"></div>
+    <div class="ambient__grain"></div>
+  </div>
+
+  <main class="standby-shell">
+    <header class="topbar">
+      <div class="brand" aria-label="RK Cast wireless display">
+        <span class="brand__mark"><i></i><i></i><i></i></span>
+        <span class="brand__name">RK <strong>CAST</strong></span>
+      </div>
+      <div class="topbar__right">
+        <span class="device-label" id="deviceName">RK Wireless Display</span>
+        <span class="status-pill" id="statusPill"><b></b><span id="statusText">等待连接</span></span>
+        <time class="clock" id="clock">--:--</time>
+      </div>
+    </header>
+
+    <section class="main-grid" aria-label="投屏引导">
+      <div class="story-column">
+        <div class="story-copy">
+          <p class="eyebrow"><span id="slideIndex">01</span> / WIRELESS DISPLAY</p>
+          <h1 id="slideTitle">把屏幕，<em>放大</em> 到这里。</h1>
+          <p class="story-description" id="slideDescription">连接同一 Wi‑Fi，几秒钟就能把电脑画面带到大屏上。</p>
+        </div>
+
+        <div class="slide-controls" aria-label="待机页幻灯片">
+          <button class="slide-dot is-active" data-slide="0" aria-label="第 1 张"></button>
+          <button class="slide-dot" data-slide="1" aria-label="第 2 张"></button>
+          <button class="slide-dot" data-slide="2" aria-label="第 3 张"></button>
+          <span class="slide-hint">自动播放 · <span id="slideCaption">零等待的连接</span></span>
+        </div>
+
+        <div class="steps" aria-label="投屏步骤">
+          <div class="step is-current"><span>01</span><strong>连接 Wi‑Fi</strong><small>加入下方网络</small></div>
+          <div class="step"><span>02</span><strong>打开投屏页</strong><small>扫码或访问地址</small></div>
+          <div class="step"><span>03</span><strong>输入投屏码</strong><small>点击开始投屏</small></div>
+        </div>
+
+        <section class="runtime-panel" aria-label="设备状态">
+          <div class="runtime-panel__head">
+            <span>DEVICE PULSE</span>
+            <span class="runtime-state" id="runtimeState">READY</span>
+          </div>
+          <div class="metric-grid">
+            <div class="metric"><span class="metric__label">CPU</span><strong id="cpuValue">--%</strong><div class="meter"><i id="cpuMeter"></i></div></div>
+            <div class="metric"><span class="metric__label">MEMORY</span><strong id="memoryValue">--%</strong><div class="meter"><i id="memoryMeter"></i></div></div>
+            <div class="metric"><span class="metric__label">TEMP</span><strong id="tempValue">--°</strong><div class="meter"><i id="tempMeter"></i></div></div>
+            <div class="metric metric--wide"><span class="metric__label">UPTIME</span><strong id="uptimeValue">--</strong><span class="metric__detail" id="profileValue">1080p30 · adaptive</span></div>
+          </div>
+          <div class="capabilities" id="capabilities"><span>WEBRTC</span><span>GSTREAMER</span><span>HDMI</span></div>
+        </section>
+      </div>
+
+      <aside class="connect-card" aria-label="连接信息">
+        <div class="connect-card__topline"><span>QUICK CONNECT</span><span class="live-dot"></span></div>
+        <div class="qr-wrap"><img id="wifiQr" src="/api/device/wifi-qr.svg" alt="Wi-Fi 连接二维码"><div class="qr-fallback" id="qrFallback">QR</div></div>
+        <p class="qr-caption">扫码连接设备 Wi‑Fi</p>
+        <div class="wifi-details">
+          <div class="wifi-row"><span>网络名称</span><strong id="ssid">RK-Screencast</strong></div>
+          <div class="wifi-row"><span>网络密码</span><strong id="password">RKcast2026</strong></div>
+        </div>
+        <div class="address-block"><span>投屏入口</span><strong id="address">https://192.168.50.1:8080</strong></div>
+        <div class="pairing-block"><span>投屏码</span><strong id="pairingCode">--------</strong></div>
+        <div class="connect-tip"><span class="tip-icon">↗</span><span>电脑与设备连接同一网络后，打开入口即可开始。</span></div>
+      </aside>
+    </section>
+
+    <footer class="footer-bar">
+      <span><i class="footer-signal"></i><span id="networkState">局域网已就绪</span></span>
+      <span class="footer-center">RK3588 · LOW LATENCY DISPLAY</span>
+      <span id="footerHint">等待你的画面</span>
+    </footer>
+  </main>
+  <div class="demo-badge" id="demoBadge">DEMO MODE</div>
+  <script src="/static/standby.js"></script>
+</body>
+</html>

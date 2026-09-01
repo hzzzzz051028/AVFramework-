@@ -28,6 +28,8 @@ sudo apt-get install -y --no-install-recommends \
     curl \
     htop \
     net-tools \
+    qrencode \
+    fonts-noto-cjk \
     2>&1 | tail -10
 
 echo "[3/5] 安装 Python 依赖..."

@@ -66,7 +66,9 @@ apt-get install -y \
     git \
     vim \
     htop \
-    net-tools
+    net-tools \
+    qrencode \
+    fonts-noto-cjk
 
 # 串口调试
 apt-get install -y \

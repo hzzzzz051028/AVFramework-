@@ -700,3 +700,9 @@ decoder.mode = software | auto | hardware
 - 质量指标：发送端已有的 `sender_stats` 被接入 `DeviceRuntime`，记录 fps、kbps、帧编码/发送数、RTCP 丢包、quality limitation 与 RTT。验收暂定为 `>=25fps`、丢包 `<3%`；状态为 `pass/investigate/awaiting_stream`。端到端时延仍需用摄像机或时间戳试验，不能把 WebRTC 统计代替为真实延迟。
 - 待机页：`frontend/standby.js` 轮询产品状态；存在流统计时，展示 fps、码率和稳定性结论，存在 HDMI 租约时显示当前输出协议，便于现场演示与定位问题。
 - 验证：本次范围 pytest 18 项通过；`compileall`、shell 语法和 diff 检查通过。全套 pytest 有 1 项既存失败：`tests/test_sender_dev.py` 仍断言 `hdmi_receiver.py` 包含已撤回的 `KMS black mask started` 日志，而当前基线实现并不存在该字符串；不要为满足断言把失效的 primary-plane 遮罩逻辑重新塞回媒体管线。
+
+### 2026-09-01 — AirPlay 服务恢复
+
+- 现象：AirPlay 接收器不可用时，根因是 `screencast-airplay-poc.service` 处于 `inactive (dead)`；并非 UxPlay 媒体管线报错。板端还提示其 systemd unit 文件已变更但未 reload。
+- 处理：已执行 `sudo systemctl daemon-reload` 和 `sudo systemctl start screencast-airplay-poc.service`。服务目前 active，UxPlay 1.74 已初始化 server socket，并广播 AirPlay Features `0x527FFEE6`；Avahi 同时 active。当前接收器展示名称为 `RK-Cast-Native`。
+- 注意：该 POC 单元仍是 disabled，板子重启后不会自行启动；这是为了避免它和 WebRTC 竞争 KMS plane 71。后续应由 display arbiter wrapper 负责显式模式切换，再决定是否改为产品级开机策略。

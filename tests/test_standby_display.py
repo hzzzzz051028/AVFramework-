@@ -9,11 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_exclusive_native_cast_guard_prevents_standby_plane_contention() -> None:
     standby = (ROOT / "scripts" / "screencast-standby.service").read_text()
     airplay = (ROOT / "scripts" / "screencast-airplay-poc.service").read_text()
+    watcher = (ROOT / "scripts" / "airplay_display_watch.sh").read_text()
     miracast = (ROOT / "scripts" / "screencast-miracast-wifid.service").read_text()
 
     assert "ConditionPathExists=!/run/screencast/display-exclusive-active" in standby
-    assert "/usr/bin/touch /run/screencast/display-exclusive-active" in airplay
     assert "/usr/bin/rm -f /run/screencast/display-exclusive-active" in airplay
+    assert "-dacp /run/screencast/airplay-client" in airplay
+    assert "screencast-airplay-display-watch.service" in airplay
+    assert "airplay-client" in watcher
+    assert "display-exclusive-active" in watcher
     assert "/usr/bin/touch /run/screencast/display-exclusive-active" in miracast
 
 

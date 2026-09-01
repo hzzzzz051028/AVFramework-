@@ -1,0 +1,14 @@
+[Unit]
+Description=RK Screencast AirPlay display mode watcher
+After=screencast-airplay-poc.service
+BindsTo=screencast-airplay-poc.service
+PartOf=screencast-airplay-poc.service
+
+[Service]
+Type=simple
+ExecStart=/opt/screencast/scripts/airplay_display_watch.sh
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=screencast-airplay-poc.service

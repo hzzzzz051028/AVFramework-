@@ -1,0 +1,28 @@
+[Unit]
+Description=RK Screencast Miracast Wi-Fi Direct (POC)
+After=network-pre.target screencast-display-console.service
+Wants=screencast-display-console.service
+Conflicts=screencast-airplay-poc.service
+
+[Service]
+Type=simple
+# MiracleCast owns only wlan0 and starts its own wpa_supplicant.  Do not stop
+# NetworkManager globally: it is also responsible for the Ethernet management
+# channel used to recover a failed P2P negotiation.
+ExecStartPre=/usr/bin/systemctl stop screencast-airplay-poc.service
+ExecStartPre=/usr/bin/systemctl stop screencast-standby.service
+ExecStartPre=/bin/sh -c '/usr/bin/nmcli device disconnect wlan0 || true'
+ExecStartPre=/usr/bin/nmcli device set wlan0 managed no
+ExecStartPre=/usr/bin/systemctl stop wpa_supplicant.service
+ExecStart=/opt/screencast/vendor/miraclecast/bin/miracle-wifid --interface wlan0 --go-intent 15 --log-level info
+ExecStopPost=/opt/screencast/scripts/restore_wlan_ap.sh
+# A P2P negotiation failure must restore the known-good AP once, not loop and
+# repeatedly tear down the management network.
+Restart=no
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=screencast-miracast-wifid
+
+[Install]
+WantedBy=multi-user.target

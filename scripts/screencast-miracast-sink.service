@@ -1,0 +1,18 @@
+[Unit]
+Description=RK Screencast Miracast Display Sink (POC)
+After=screencast-miracast-wifid.service
+Requires=screencast-miracast-wifid.service
+PartOf=screencast-miracast-wifid.service
+
+[Service]
+Type=simple
+ExecStart=/opt/screencast/scripts/miracast_sink_runner.sh
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=screencast-miracast-sink
+
+[Install]
+WantedBy=multi-user.target

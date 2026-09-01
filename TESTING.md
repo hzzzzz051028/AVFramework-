@@ -56,6 +56,23 @@ http://127.0.0.1:8090/p2p-sender.html?testMedia=1
 - sender 断开后的通知和房间清理。
 - sender 主动停止后的连接角色解除和房间清理。
 - DesktopGStreamerReceiver 在缺少系统依赖时的失败状态和原因。
+- 整机状态机随 MockReceiver 完成 `ready → connecting → casting → ready` 转换。
+- 会话数、播放数、完成数、失败数和首帧耗时指标累计。
+- 温度、CPU、丢包和丢帧输入对应的 1080p/720p 降级建议。
+
+整机运行状态与指标：
+
+```text
+GET /api/device/runtime
+```
+
+在无板环境可注入遥测数据验证降级决策。当前接口只返回建议，不会自动修改媒体管线：
+
+```bash
+curl -X POST http://127.0.0.1:8090/api/device/telemetry \
+  -H 'Content-Type: application/json' \
+  -d '{"temperature_c": 86, "cpu_percent": 70, "packet_loss_percent": 1}'
+```
 
 `tests/` 是新的自动化测试目录；原 `test/` 目录中的脚本属于需要手动启动服务的历史检查脚本，暂不作为 pytest 默认测试集。
 
@@ -199,13 +216,119 @@ export GST_REGISTRY=/tmp/gst-registry-wireless.bin
 
 ## 真实电脑屏幕测试（推荐）
 
-真实屏幕采集需要安全上下文。为避免板端自签名证书影响 WSS，优先在电脑本机提供发送页：
+真实屏幕采集需要安全上下文。正式流程直接使用设备的可信 HTTPS 页面；页面会同源连接设备的 WSS：
 
 ```bash
-.venv/bin/python tools/run_sender_dev.py
+open https://192.168.1.109:8080/p2p-sender.html
 ```
 
-然后用 Chrome/Edge 打开脚本输出的 `Real screen` 地址。页面运行在 `localhost`，屏幕采集可用，信令通过 `ws://192.168.1.109:8081/ws` 连接板端。
+首次使用前需把项目 `.local-certs/ca.pem` 导入发送电脑的受信任根证书库；这是一次性操作。随后直接打开 `https://192.168.1.109:8080/p2p-sender.html`，浏览器可以采集屏幕，页面也会同源连接 `wss://192.168.1.109:8080/ws`。
+
+### 以太网投屏验证（不切换笔记本 Wi-Fi）
+
+笔记本保留 Wi-Fi 上网，使用另一块网卡/USB 网卡通过网线连接板子所在的交换机或路由器。当前板端以太网地址为 `192.168.1.109`，不要把这里的以太网地址替换成 AP 地址 `192.168.50.1`。
+
+先确认链路：
+
+```bash
+curl -k https://192.168.1.109:8080/health
+```
+
+在浏览器直接打开 `https://192.168.1.109:8080/p2p-sender.html`。页面会自动使用同源的 `wss://192.168.1.109:8080/ws`；不要手动填写 WebSocket 地址。在页面填写 HDMI 待机画面显示的 8 位投屏码，再点击“开始投屏”。
+
+用 Chrome/Edge 打开脚本输出的 `Real screen` 地址，点击“开始投屏”，选择“整个屏幕”。预期页面日志依次出现 `WS 已连接`、`ICE state: connected`、`P2P 连接成功`；板端 HDMI 显示画面。停止后检查：
+
+```bash
+curl -k https://192.168.1.109:8080/api/device/runtime
+```
+
+应回到 `"state": "ready"`，且 `active_session_id` 为 `null`。端口 `8081` 只绑定在 RK3588 的 `127.0.0.1`，供 HDMI receiver 使用；局域网客户端不能也不应再连接它。
+
+### AP 局域网投屏验证
+
+板端 AP 使用 NetworkManager 管理，配置脚本是幂等的。板端仍通过有线 SSH
+可访问时，在本机执行：
+
+```bash
+scripts/remote_service.sh ap-setup
+```
+
+默认网络参数：
+
+- SSID：`RK-Screencast`
+- 密码：`RKcast2026`
+- 网关：`192.168.50.1`
+- DHCP：`192.168.50.10`–`192.168.50.254`
+- 投屏信令：`wss://192.168.50.1:8080/ws`
+
+然后按以下顺序验证：
+
+1. 保持板子通电，确认 HDMI 待机页显示 AP SSID、密码、HTTPS 地址和 8 位投屏码。
+2. 在笔记本或手机的 Wi-Fi 中连接 `RK-Screencast`，等待获取 `192.168.50.x` 地址。
+3. 首次使用时，把设备对应的 `ca.pem` 导入系统/浏览器受信任根证书库；随后访问 `https://192.168.50.1:8080/health`。不要通过忽略证书告警来替代信任 CA。
+4. 直接打开 `https://192.168.50.1:8080/p2p-sender.html`，选择整个屏幕并开始投屏；填写 HDMI 上的投屏码。不要使用 HTTP 页面，因为浏览器不会允许它采集真实屏幕。
+5. 发送页日志应依次出现 `投屏码验证成功`、`ICE connected`、`P2P 连接成功`；
+   HDMI 应恢复为投屏画面。
+6. 停止投屏，确认 HDMI 回到待机页；板端 runtime 应回到 `ready`。
+7. 可选：在 AP 客户端执行 `ping 192.168.50.1`；只有当板子 Ethernet 接入真实
+   有线路由器（且板端默认网关可达）时，才应继续测试外网访问。若 Ethernet
+   只是笔记本直连调试线，AP 仍可投屏，但不会自动获得互联网。
+
+AP 与 Ethernet 使用相同的投屏协议和媒体管道，仅地址不同。当前默认 AP 为
+2.4GHz/20MHz，测试延迟时要固定相同的发送分辨率和帧率，再与 Ethernet 结果比较。
+
+### 四种网络模式
+
+通过有线 SSH 可访问板端时，使用统一切换脚本：
+
+```bash
+# 有线局域网：关闭 AP，使用网线连接投屏器
+scripts/remote_service.sh network-mode wired-lan
+
+# 现有局域网：关闭 RK AP，保持板端加入已有连接
+scripts/remote_service.sh network-mode same-lan
+
+# 无上行的独立 AP：只保证离线局域网投屏
+scripts/remote_service.sh network-mode standalone-ap
+
+# AP + Ethernet 上行：AP 客户端同时经板端上网
+scripts/remote_service.sh network-mode ap-uplink
+```
+
+`same-lan` 如果需要切换到指定的 NetworkManager Wi-Fi profile，可直接在板端
+执行 `sudo UPLINK_CONNECTION='连接名' bash /tmp/configure_network_mode.sh same-lan`。
+`wired-lan` 默认激活第一个 Ethernet profile；如果设备存在多个有线 profile，
+可设置 `WIRED_CONNECTION='连接名'` 后执行脚本。该模式适合低延迟、稳定投屏，
+发送端不需要加入 RK AP，只需与板端处于同一有线局域网。
+`ap-uplink` 会检查 `wlan0` 之外是否存在默认路由；没有上行时仍会启动 AP，
+但明确输出警告，不会阻止离线投屏。
+
+### RK3588 MPP 硬解回归
+
+MPP 插件在板端隔离安装后，先启用服务环境并验证 factory：
+
+```bash
+scripts/remote_service.sh deploy
+scripts/remote_service.sh enable-mpp
+ssh orangepi@192.168.1.109 \
+  'sudo journalctl -u screencast -n 120 --no-pager | grep -E "Decoder selected|VIDEO PIPELINE"'
+```
+
+投屏一次 720p30 H.264 测试媒体或真实屏幕后，日志必须出现：
+
+```text
+Decoder selected: mppvideodec
+VIDEO PIPELINE LINKED: H264
+```
+
+若服务无法启动或投屏失败，可立即回退到系统软件解码：
+
+```bash
+ssh orangepi@192.168.1.109 \
+  'sudo rm -f /etc/systemd/system/screencast.service.d/mpp.conf && sudo systemctl daemon-reload && sudo systemctl restart screencast'
+```
+
+不要只根据 `/dev/mpp_service` 或 `gst-inspect` 判断完成；必须完成一次 WebRTC→MPP→KMS 实机播放，并使用物理计时（手机慢动作或画面时间戳）测量稳定端到端延迟。
 
 ## 无硬件媒体管道模拟
 
@@ -221,3 +344,23 @@ export GST_PLUGIN_PATH=/Users/hhz/hb/lib/gstreamer-1.0
 ```
 
 该测试覆盖媒体帧产生、转换、H.264 编码、解析、软件解码和 sink 消费；不模拟 AP 或 HDMI/KMS。
+
+## 独立待机页预览
+
+待机页已经从 KMS 生成器中拆出，支持浏览器独立预览；`demo=1` 使用本地演示数据，不依赖板子：
+
+```bash
+.venv/bin/python tools/run_mock_server.py --port 8090
+```
+
+打开 `http://127.0.0.1:8090/standby.html?demo=1`。正式模式会轮询 `/api/device-info`、`/api/device/runtime`、`/api/system` 和 `/api/status`，显示 Wi-Fi 引导、轮播内容、CPU/内存/温度、运行时间及硬件能力。
+
+目录职责：
+
+- `frontend/standby.html`、`standby.css`、`standby.js`：可迁移的产品界面与数据绑定。
+- `frontend/assets/standby/`：本地轮播视觉素材，不依赖 CDN。
+- `backend/standby_renderers/html_kiosk.py`：可选 Chromium + cage 输出适配器。
+- `backend/standby_renderers/svg_kms.py`：无浏览器时的启动/故障安全静态回退。
+- `backend/standby_display.py`：systemd 兼容入口，仅负责选择 renderer。
+
+当前 systemd 默认仍使用 SVG/KMS 回退；板端安装 Chromium/cage 后可设置 `SCREENCAST_STANDBY_MODE=html`，再验证 Wayland kiosk 与 DRM 所有权切换。

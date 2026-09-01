@@ -33,6 +33,7 @@ from receivers import ReceiverSupervisor
 from device_runtime import DeviceRuntime
 from network_mode import detect_network_status
 from pairing import PairingManager
+from display_arbiter import DisplayArbiter
 
 # ========================================
 # 日志
@@ -47,6 +48,7 @@ logger = logging.getLogger(__name__)
 RECEIVER_SUPERVISOR_KEY = web.AppKey("receiver_supervisor", ReceiverSupervisor)
 DEVICE_RUNTIME_KEY = web.AppKey("device_runtime", DeviceRuntime)
 PAIRING_MANAGER_KEY = web.AppKey("pairing_manager", PairingManager)
+DISPLAY_ARBITER_KEY = web.AppKey("display_arbiter", DisplayArbiter)
 
 # ========================================
 # 路径
@@ -520,6 +522,80 @@ async def api_device_runtime(request):
     return web.json_response(request.app[DEVICE_RUNTIME_KEY].snapshot())
 
 
+def _casting_compatibility(network):
+    """Describe product paths without changing interfaces or services."""
+    lan_ready = network.mode in {"same_lan", "wired_lan", "standalone_ap", "ap_uplink"}
+    return {
+        "webrtc": {
+            "available": lan_ready,
+            "discovery": "QR code or direct HTTPS address",
+            "network_requirement": "same LAN or device AP",
+        },
+        "airplay": {
+            "available": lan_ready,
+            "discovery": "mDNS / iOS Screen Mirroring",
+            "network_requirement": "same LAN or device AP",
+        },
+        "miracast": {
+            "available": True,
+            "discovery": "Wi-Fi Direct / Android Cast",
+            "network_requirement": "Wi-Fi Direct radio",
+            "ap_constraint": "Current single-radio prototype needs an explicit AP/P2P mode switch.",
+        },
+    }
+
+
+async def api_product_status(request):
+    """GET /api/product/status - one screen for source, network, and quality."""
+    network = detect_network_status()
+    runtime = request.app[DEVICE_RUNTIME_KEY]
+    return web.json_response({
+        "network": network.to_dict(),
+        "display": request.app[DISPLAY_ARBITER_KEY].snapshot(),
+        "runtime": runtime.snapshot(),
+        "compatibility": _casting_compatibility(network),
+        "control_note": "A display claim reserves HDMI only; the source service owns start/stop of its media pipeline.",
+    })
+
+
+async def api_display_claim(request):
+    """Reserve HDMI for a local AirPlay/Miracast/WebRTC service wrapper."""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "claim must be an object"}, status=400)
+    source = body.get("source")
+    session_id = body.get("session_id")
+    replace = bool(body.get("replace", False))
+    try:
+        result = request.app[DISPLAY_ARBITER_KEY].acquire(source, session_id, replace=replace)
+    except ValueError as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    return web.json_response(result, status=200 if result["accepted"] else 409)
+
+
+async def api_display_release(request):
+    """Release a local service's HDMI lease after it stops rendering."""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        return web.json_response({"error": "release must be an object"}, status=400)
+    released = request.app[DISPLAY_ARBITER_KEY].release(
+        body.get("source"), body.get("session_id")
+    )
+    return web.json_response({"released": released, "display": request.app[DISPLAY_ARBITER_KEY].snapshot()})
+
+
 async def api_device_telemetry(request):
     """POST /api/device/telemetry - ingest metrics and return a dry-run profile."""
     try:
@@ -665,7 +741,11 @@ async def ws_handler(request):
                             await ws.send_json({"t": "error", "msg": result})
                         continue
                     await handle_ws_message(
-                        cid, data, receiver_supervisor, device_runtime
+                        cid,
+                        data,
+                        receiver_supervisor,
+                        device_runtime,
+                        request.app[DISPLAY_ARBITER_KEY],
                     )
                 except json.JSONDecodeError:
                     await ws.send_json({"type": "error", "message": "invalid json"})
@@ -673,7 +753,11 @@ async def ws_handler(request):
                 logger.error("[WS] 错误: %s", ws.exception())
     finally:
         await handle_ws_disconnect(
-            ws, cid, receiver_supervisor, device_runtime
+            ws,
+            cid,
+            receiver_supervisor,
+            device_runtime,
+            request.app[DISPLAY_ARBITER_KEY],
         )
         logger.info("[WS] 客户端断开: cid=%s", cid)
 
@@ -706,7 +790,7 @@ def _msg_for(fmt, t_short, t_long, sid, **kw):
 
 
 async def handle_ws_message(
-    cid, data, receiver_supervisor=None, device_runtime=None
+    cid, data, receiver_supervisor=None, device_runtime=None, display_arbiter=None
 ):
     """处理 WebSocket 消息 - 同时支持 long 和 short 两种消息格式"""
     fmt = _detect_format(data)
@@ -735,6 +819,8 @@ async def handle_ws_message(
                         stats.get("frames_encoded"), stats.get("frames_sent"),
                         stats.get("packets_lost"), stats.get("packets_received"),
                         stats.get("quality_limit"), stats.get("rtt_ms"))
+            if device_runtime is not None and sid:
+                device_runtime.record_stream_stats(sid, stats)
         return
 
     # WHEP over WebSocket (兼容模式) - 仅 long format
@@ -822,6 +908,23 @@ async def handle_ws_message(
         client_to_room[cid] = sid
         # Auto-start HDMI display for new sender
         if is_new:
+            if display_arbiter is not None:
+                active = display_arbiter.snapshot()["active"]
+                if active and active["source"] != "webrtc":
+                    await _send_to(
+                        cid,
+                        _msg_for(
+                            fmt,
+                            "error",
+                            "error",
+                            sid,
+                            msg=f"display_busy:{active['source']}",
+                        ),
+                    )
+                    return
+                lease = display_arbiter.acquire("webrtc", sid)
+                if lease.get("replaced"):
+                    logger.info("[DisplayLease] WebRTC replaced %s", lease["replaced"])
             if receiver_supervisor is not None:
                 await receiver_supervisor.start(
                     sid,
@@ -831,7 +934,9 @@ async def handle_ws_message(
             else:
                 if device_runtime is not None:
                     device_runtime.begin_session(sid)
-                asyncio.ensure_future(_auto_start_display(sid, device_runtime))
+                asyncio.ensure_future(
+                    _auto_start_display(sid, device_runtime, display_arbiter)
+                )
         sdp = data.get("sdp", "")
         offer_msgs = {
             "short": _make_short("offer", sid, sdp=sdp),
@@ -911,6 +1016,8 @@ async def handle_ws_message(
                 asyncio.ensure_future(_stop_display())
                 if device_runtime is not None:
                     device_runtime.end_session(sid)
+            if display_arbiter is not None:
+                display_arbiter.release("webrtc", sid)
             room.sender = None
             room.pending_offer = {}
             room.pending_ice = []
@@ -926,7 +1033,7 @@ async def handle_ws_message(
 
 
 async def handle_ws_disconnect(
-    ws, cid, receiver_supervisor=None, device_runtime=None
+    ws, cid, receiver_supervisor=None, device_runtime=None, display_arbiter=None
 ):
     """清理断开连接"""
     # WHEP 会话清理
@@ -950,6 +1057,8 @@ async def handle_ws_disconnect(
                     asyncio.ensure_future(_stop_display())
                     if device_runtime is not None:
                         device_runtime.end_session(room_id)
+                if display_arbiter is not None:
+                    display_arbiter.release("webrtc", room_id)
                 room.sender = None
                 room.pending_offer = {}
                 room.pending_ice = []
@@ -1118,6 +1227,12 @@ async def api_display_start(request):
     if not sid:
         return web.json_response({"error": "missing session_id"}, status=400)
 
+    arbiter = request.app[DISPLAY_ARBITER_KEY]
+    active = arbiter.snapshot()["active"]
+    if active and active["source"] != "webrtc":
+        return web.json_response({"error": "display_busy", "active": active}, status=409)
+    arbiter.acquire("webrtc", sid)
+
     await _stop_display(restore_standby=False)
     _control_standby("stop")
     request.app[DEVICE_RUNTIME_KEY].begin_session(sid)
@@ -1147,17 +1262,20 @@ async def api_display_start(request):
                     "exit_code": _display_process.returncode,
                 },
             )
+            arbiter.release("webrtc", sid)
             return web.json_response({"error": f"receiver failed: {log_content[-200:]}"}, status=500)
 
         _display_room_id = sid
         logger.info("[DISPLAY] started pid=%d sid=%s", _display_process.pid, sid)
         return web.json_response({"status": "started", "pid": _display_process.pid, "sid": sid})
     except FileNotFoundError as e:
+        arbiter.release("webrtc", sid)
         request.app[DEVICE_RUNTIME_KEY].fail_session(
             sid, {"reason": "display_worker_not_found"}
         )
         return web.json_response({"error": f"{e.strerror}: python3 or hdmi_receiver.py not found"}, status=500)
     except Exception as e:
+        arbiter.release("webrtc", sid)
         request.app[DEVICE_RUNTIME_KEY].fail_session(
             sid, {"reason": "display_worker_start_failed", "error": str(e)}
         )
@@ -1189,7 +1307,7 @@ async def _stop_display(restore_standby=True):
         _control_standby("start")
 
 
-async def _auto_start_display(sid, device_runtime=None):
+async def _auto_start_display(sid, device_runtime=None, display_arbiter=None):
     """Auto-start HDMI display when sender begins sharing."""
     global _display_process, _display_room_id
 
@@ -1216,6 +1334,8 @@ async def _auto_start_display(sid, device_runtime=None):
             device_runtime.fail_session(
                 sid, {"reason": "display_worker_start_failed", "error": str(e)}
             )
+        if display_arbiter is not None:
+            display_arbiter.release("webrtc", sid)
 
 
 async def api_display_stop(request):
@@ -1224,6 +1344,7 @@ async def api_display_stop(request):
     await _stop_display(restore_standby=True)
     if stopped_session:
         request.app[DEVICE_RUNTIME_KEY].end_session(stopped_session)
+        request.app[DISPLAY_ARBITER_KEY].release("webrtc", stopped_session)
     return web.json_response({"status": "stopped"})
 
 
@@ -1300,12 +1421,18 @@ def _get_uptime():
     return int(time.time() - _start_time)
 
 
-def create_app(receiver_supervisor=None, device_runtime=None, pairing_manager=None):
+def create_app(
+    receiver_supervisor=None,
+    device_runtime=None,
+    pairing_manager=None,
+    display_arbiter=None,
+):
     app = web.Application()
 
     runtime = device_runtime or DeviceRuntime()
     app[DEVICE_RUNTIME_KEY] = runtime
     app[PAIRING_MANAGER_KEY] = pairing_manager or PairingManager()
+    app[DISPLAY_ARBITER_KEY] = display_arbiter or DisplayArbiter()
 
     if receiver_supervisor is not None:
         receiver_supervisor.set_event_handler(runtime.handle_receiver_event)
@@ -1328,6 +1455,7 @@ def create_app(receiver_supervisor=None, device_runtime=None, pairing_manager=No
     app.router.add_get("/info", server_info)
     app.router.add_get("/api/device-info", api_device_info)
     app.router.add_get("/api/device/runtime", api_device_runtime)
+    app.router.add_get("/api/product/status", api_product_status)
     app.router.add_post("/api/device/telemetry", api_device_telemetry)
     app.router.add_get("/api/device/wifi-qr.svg", api_device_wifi_qr)
     app.router.add_get("/api/device/pairing-code", api_pairing_code)
@@ -1356,6 +1484,8 @@ def create_app(receiver_supervisor=None, device_runtime=None, pairing_manager=No
     app.router.add_post("/api/display/start", api_display_start)
     app.router.add_delete("/api/display/stop", api_display_stop)
     app.router.add_get("/api/display/status", api_display_status)
+    app.router.add_post("/api/display/claim", api_display_claim)
+    app.router.add_post("/api/display/release", api_display_release)
     app.router.add_get("/api/receiver/status", api_receiver_status)
 
     # 静态文件

@@ -89,7 +89,7 @@ async def test_websocket_offer_drives_mock_receiver_lifecycle(mock_service) -> N
 async def test_legacy_hdmi_status_drives_product_state(
     aiohttp_client, monkeypatch
 ) -> None:
-    async def fake_start(session_id, device_runtime=None):
+    async def fake_start(session_id, device_runtime=None, display_arbiter=None):
         server._display_room_id = session_id
 
     async def fake_stop(restore_standby=True):

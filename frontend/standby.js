@@ -68,6 +68,21 @@
     $('statusPill').style.color = active ? 'var(--cyan)' : runtime.state === 'degraded' || runtime.state === 'fault' ? 'var(--coral)' : 'var(--safe)';
     $('footerHint').textContent = active ? `正在接收 · ${runtime.active_session_id || 'LIVE'}` : '等待你的画面';
   }
+  function renderProduct(product) {
+    if (!product) return;
+    const active = product.display?.active;
+    const perf = product.runtime?.performance;
+    const fps = Number(perf?.sender?.fps);
+    const kbps = Number(perf?.sender?.kbps);
+    if (Number.isFinite(fps)) {
+      const quality = perf.verdict === 'pass' ? '稳定' : perf.verdict === 'investigate' ? '检查链路' : '采样中';
+      const rate = Number.isFinite(kbps) ? ` · ${Math.round(kbps)}kbps` : '';
+      setText('profileValue', `${Math.round(fps)}fps${rate} · ${quality}`);
+    }
+    if (active) {
+      $('footerHint').textContent = `HDMI 输出 · ${String(active.source).toUpperCase()}`;
+    }
+  }
   function renderSystem(system) {
     if (!system) return;
     const mem = Number(system.memory?.percent);
@@ -96,14 +111,15 @@
       runtime: { state: 'ready', adaptation: { recommended_profile: { name: '1080p30' } } },
       system: { memory: { percent: 42 }, temperatures: { soc: 51 + Math.sin(t / 8) * 2 }, cpu_idle: 4400 - Math.round(t * 4), cpu_total: 5100 + Math.round(t * 4), service_uptime: 12784 },
       status: { hardware: { mpp_available: true, rga_available: true, drm_available: true } },
+      product: { display: { active: null }, runtime: { performance: { verdict: 'awaiting_stream', sender: {} } } },
     };
   }
   async function getJson(path) { const response = await fetch(path, { cache: 'no-store' }); if (!response.ok) throw new Error(`${response.status}`); return response.json(); }
   async function refresh() {
-    if (demo) { const d = demoData(); renderDevice(d.info); renderRuntime(d.runtime); renderSystem(d.system); renderStatus(d.status); return; }
-    const results = await Promise.allSettled(['/api/device-info', '/api/device/runtime', '/api/system', '/api/status', '/api/device/pairing-code'].map(getJson));
-    const [info, runtime, system, status, pairing] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
-    renderDevice(info); renderRuntime(runtime); renderSystem(system); renderStatus(status);
+    if (demo) { const d = demoData(); renderDevice(d.info); renderRuntime(d.runtime); renderSystem(d.system); renderStatus(d.status); renderProduct(d.product); return; }
+    const results = await Promise.allSettled(['/api/device-info', '/api/device/runtime', '/api/system', '/api/status', '/api/device/pairing-code', '/api/product/status'].map(getJson));
+    const [info, runtime, system, status, pairing, product] = results.map((result) => result.status === 'fulfilled' ? result.value : null);
+    renderDevice(info); renderRuntime(runtime); renderSystem(system); renderStatus(status); renderProduct(product);
     setText('pairingCode', pairing?.code, '--------');
     if (results.every((result) => result.status === 'rejected')) { document.body.dataset.offline = 'true'; }
   }

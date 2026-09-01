@@ -118,6 +118,7 @@ class DeviceRuntime:
         self._last_receiver_state: Optional[str] = None
         self._last_error: Optional[Dict[str, Any]] = None
         self._last_telemetry: Dict[str, Any] = {}
+        self._stream_stats: Dict[str, Any] = {}
         self._policy = policy or AdaptationPolicy()
         self._metrics = {
             "sessions_started": 0,
@@ -231,6 +232,54 @@ class DeviceRuntime:
         }
         return self._policy.evaluate(self._last_telemetry)
 
+    def record_stream_stats(self, session_id: str, stats: Mapping[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "fps",
+            "kbps",
+            "frames_encoded",
+            "frames_sent",
+            "packets_lost",
+            "packets_received",
+            "quality_limit",
+            "rtt_ms",
+        }
+        self._stream_stats = {key: stats.get(key) for key in allowed if key in stats}
+        self._stream_stats["session_id"] = session_id
+        received = _number(self._stream_stats.get("packets_received")) or 0
+        lost = _number(self._stream_stats.get("packets_lost")) or 0
+        self.update_telemetry(
+            {
+                "fps": self._stream_stats.get("fps"),
+                "bitrate_kbps": self._stream_stats.get("kbps"),
+                "packet_loss_percent": (
+                    round(lost * 100 / (lost + received), 3)
+                    if lost + received
+                    else 0
+                ),
+            }
+        )
+        return self.performance_snapshot()
+
+    def performance_snapshot(self) -> Dict[str, Any]:
+        fps = _number(self._stream_stats.get("fps"))
+        loss = _number(self._last_telemetry.get("packet_loss_percent")) or 0
+        if fps is None:
+            verdict = "awaiting_stream"
+        elif fps >= 25 and loss < 3:
+            verdict = "pass"
+        else:
+            verdict = "investigate"
+        return {
+            "sender": dict(self._stream_stats),
+            "telemetry": dict(self._last_telemetry),
+            "verdict": verdict,
+            "acceptance": {
+                "target_fps": 30,
+                "max_packet_loss_percent": 3,
+                "note": "End-to-end latency needs a camera or timestamp test.",
+            },
+        }
+
     def mark_fault(self, reason: str) -> None:
         self._last_error = {"reason": reason}
         self._transition(DeviceState.FAULT)
@@ -257,6 +306,7 @@ class DeviceRuntime:
             "metrics": metrics,
             "telemetry": dict(self._last_telemetry),
             "adaptation": self._policy.evaluate(self._last_telemetry),
+            "performance": self.performance_snapshot(),
             "last_error": self._last_error,
         }
 

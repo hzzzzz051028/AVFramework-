@@ -35,3 +35,28 @@ async def test_telemetry_api_returns_degradation_recommendation(client) -> None:
     assert data["adaptation"]["tier"] == "critical"
     assert data["adaptation"]["recommended_profile"]["name"] == "720p20"
     assert data["adaptation"]["automatic_apply"] is False
+
+
+@pytest.mark.asyncio
+async def test_product_status_exposes_network_display_and_acceptance(client) -> None:
+    response = await client.get("/api/product/status")
+    assert response.status == 200
+    data = await response.json()
+    assert data["display"]["active"] is None
+    assert data["runtime"]["performance"]["verdict"] == "awaiting_stream"
+    assert data["compatibility"]["webrtc"]["discovery"] == "QR code or direct HTTPS address"
+
+
+@pytest.mark.asyncio
+async def test_local_display_claim_can_be_released(client) -> None:
+    response = await client.post(
+        "/api/display/claim", json={"source": "airplay", "session_id": "test-airplay"}
+    )
+    assert response.status == 200
+    assert (await response.json())["active"]["source"] == "airplay"
+
+    response = await client.post(
+        "/api/display/release", json={"source": "airplay", "session_id": "test-airplay"}
+    )
+    assert response.status == 200
+    assert (await response.json())["released"] is True

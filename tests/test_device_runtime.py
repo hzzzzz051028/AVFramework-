@@ -76,3 +76,16 @@ def test_adaptation_policy_recommends_but_does_not_apply() -> None:
     assert constrained["recommended_profile"]["name"] == "720p30"
     assert critical["recommended_profile"]["name"] == "720p20"
     assert critical["automatic_apply"] is False
+
+
+def test_stream_stats_create_an_explicit_acceptance_verdict() -> None:
+    runtime = DeviceRuntime()
+
+    performance = runtime.record_stream_stats(
+        "cast-1",
+        {"fps": 29, "kbps": 6200, "packets_received": 970, "packets_lost": 3},
+    )
+
+    assert performance["verdict"] == "pass"
+    assert performance["sender"]["session_id"] == "cast-1"
+    assert performance["telemetry"]["packet_loss_percent"] < 3

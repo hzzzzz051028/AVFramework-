@@ -720,3 +720,9 @@ decoder.mode = software | auto | hardware
 - 现象：即使 `getty@tty2.service` 已被 mask，HDMI 底层仍显示 `focal tty2`。板端查到实际进程是 `/sbin/agetty ... tty2`，所属 unit 为 `autovt@tty2.service`；这是与 `getty@tty2` 不同的 systemd 自动虚拟终端机制。
 - 修复：`configure_display_console.sh` 现在同时 mask `getty@tty2.service` 和 `autovt@tty2.service` 并停止后者；`screencast-display-console.service` 每次启动也会 runtime-mask/stop `autovt@tty2` 后再切到 tty2、清屏和隐藏光标。
 - 板端验证：已部署并立即 mask/stop；`screencast-display-console.service=active`、待机服务正常 active、两个 tty2 unit 均为 masked、没有 `agetty.*tty2` 进程、`fgconsole=2`。内核 cmdline 只保留 `console=ttyS2`，SSH 与串口维护路径未改动。
+
+### 2026-09-02 — AirPlay 开机自启动验证通过
+
+- 原因：板端仍保留旧的 `screencast-airplay-poc.service`，它在 `[Install]` 中被刻意保持 disabled，且当时没有会话级 watcher unit；所以重启后 AirPlay 不会启动。
+- 部署：已安装最新 AirPlay unit、`screencast-airplay-display-watch.service`、watch 脚本与带显示独占条件的 standby unit；执行 `systemctl enable --now screencast-airplay-poc.service`。AirPlay unit 显式 Wants/After `NetworkManager-wait-online.service`，避免 mDNS/网卡尚未就绪就广播。
+- 实机重启验收：空闲状态下执行板子重启。`nm-online` 在启动后约 11 秒完成，此前较早的检查看到 inactive；随后本次启动日志确认 UxPlay 初始化 socket 并广播 AirPlay Features `0x527FFEE6`。最终为 `airplay=active`、`watcher=active`、`standby=active`、无 display-exclusive marker（idle-standby）；证明 AirPlay 可被发现时待机页仍显示，实际客户端连接时由 DACP file watcher 再切换显示。

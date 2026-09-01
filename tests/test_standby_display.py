@@ -16,6 +16,7 @@ def test_exclusive_native_cast_guard_prevents_standby_plane_contention() -> None
     assert "/usr/bin/rm -f /run/screencast/display-exclusive-active" in airplay
     assert "-dacp /run/screencast/airplay-client" in airplay
     assert "screencast-airplay-display-watch.service" in airplay
+    assert "NetworkManager-wait-online.service" in airplay
     assert "airplay-client" in watcher
     assert "display-exclusive-active" in watcher
     assert "/usr/bin/touch /run/screencast/display-exclusive-active" in miracast

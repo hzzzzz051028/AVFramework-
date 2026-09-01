@@ -1,7 +1,7 @@
 [Unit]
 Description=RK Screencast AirPlay Receiver (POC)
-After=network-online.target avahi-daemon.service screencast-display-console.service
-Wants=network-online.target avahi-daemon.service screencast-airplay-display-watch.service
+After=network-online.target NetworkManager-wait-online.service avahi-daemon.service screencast-display-console.service
+Wants=network-online.target NetworkManager-wait-online.service avahi-daemon.service screencast-airplay-display-watch.service
 
 [Service]
 Type=simple

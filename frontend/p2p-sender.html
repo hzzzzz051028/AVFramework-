@@ -10,7 +10,7 @@
     button { padding:.7rem 1.4rem; font-size:1rem; border:none; border-radius:8px; background:#6c5ce7; color:#fff; cursor:pointer; margin:.3rem; }
     button:hover { background:#5a4bd1; }
     button:disabled { background:#444; cursor:not-allowed; }
-    input { padding:.6rem 1rem; font-size:1rem; border:1px solid #333; border-radius:8px; background:#16213e; color:#fff; width:260px; text-align:center; }
+    input, select { padding:.6rem 1rem; font-size:1rem; border:1px solid #333; border-radius:8px; background:#16213e; color:#fff; width:260px; text-align:center; }
     input::placeholder { color:#666; }
     .devices { margin:1rem auto; text-align:left; max-width:500px; }
     .devices h3 { font-size:.85rem; color:#888; margin-bottom:.5rem; }
@@ -24,6 +24,10 @@
     video { width:100%; max-width:960px; margin-top:1rem; border-radius:8px; display:none; background:#000; }
     #sid { font-size:1.2rem; color:#a29bfe; margin:.5rem 0; word-break:break-all; user-select:all; }
     #connInfo { font-size:.8rem; color:#555; margin:.2rem 0; }
+    .pairing { margin:1.25rem auto .5rem; max-width:360px; }
+    .pairing label { display:block; color:#cbd5ff; font-size:.9rem; margin-bottom:.45rem; }
+    #pairCode { font-size:1.35rem; font-weight:bold; letter-spacing:.34em; width:100%; }
+    .pairing-hint { color:#8791b8; font-size:.78rem; margin-top:.45rem; }
   </style>
 </head>
 <body>
@@ -31,6 +35,19 @@
   <div class="devices">
     <button onclick="discoverDevices()">扫描设备</button>
     <div id="devList"></div>
+  </div>
+  <div class="pairing">
+    <label for="pairCode">投屏码</label>
+    <input id="pairCode" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="大屏显示的 8 位投屏码">
+    <div class="pairing-hint">每次设备启动后更新；投屏码不会通过网络接口公开。</div>
+  </div>
+  <div class="pairing">
+    <label for="qualityProfile">投屏档位</label>
+    <select id="qualityProfile">
+      <option value="2k">2K 清晰档（最高 2560×1440 / 30fps）</option>
+      <option value="1080">1080P 平衡档（最高 1920×1080 / 30fps）</option>
+      <option value="realtime">720P 实时档（最高 1280×720 / 60fps）</option>
+    </select>
   </div>
   <button id="btnStart" onclick="start()">开始投屏</button>
   <button id="btnStop" onclick="stop()" style="display:none">停止</button>
@@ -45,10 +62,64 @@ const logLine = (m) => { logEl.textContent += m + '\n'; logEl.scrollTop = logEl.
 
 let pc = null, ws = null, stream = null, sessionId = null;
 let stopped = false;
+let statsTimer = null;
+let lastStatsBytes = 0;
+let lastStatsAt = 0;
 const pageParams = new URLSearchParams(location.search);
 let wsBase = pageParams.get('ws') || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`;
 const testMediaMode = pageParams.get('testMedia') === '1';
+const CAPTURE_PROFILES = {
+  // Browser capture cannot invent pixels: a lower-resolution source stays
+  // at its source size even if the selected profile has a higher ceiling.
+  '2k': { label: '2K 清晰档', width: 2560, height: 1440, frameRate: 30, bitrate: 30000000 },
+  '1080': { label: '1080P 平衡档', width: 1920, height: 1080, frameRate: 30, bitrate: 18000000 },
+  realtime: { label: '720P 实时档', width: 1280, height: 720, frameRate: 60, bitrate: 14000000 },
+};
+const requestedQuality = pageParams.get('quality');
+const qualityProfile = CAPTURE_PROFILES[requestedQuality] ? requestedQuality : '2k';
+document.getElementById('qualityProfile').value = qualityProfile;
+// A visible local preview is useful while developing, but it creates an
+// encode/decode feedback loop when the user shares the whole desktop that
+// contains this page.  Keep it opt-in so normal quality measurements are
+// meaningful.  Append ?preview=1 when a local preview is explicitly wanted.
+const localPreviewEnabled = pageParams.get('preview') === '1';
 let testMediaFrame = null;
+
+function selectedCaptureProfile() {
+  return CAPTURE_PROFILES[document.getElementById('qualityProfile').value] || CAPTURE_PROFILES['2k'];
+}
+
+function captureConstraints(profile) {
+  return {
+    cursor: 'always',
+    width: { ideal: profile.width, max: profile.width },
+    height: { ideal: profile.height, max: profile.height },
+    frameRate: { ideal: profile.frameRate, max: profile.frameRate },
+  };
+}
+
+function applyLanH264Bitrate(sdp, profile) {
+  // GStreamer's older WebRTC stack does not always give Chromium a useful
+  // initial bandwidth estimate. On a clean LAN Chromium then self-limits to
+  // a few hundred kbps despite zero packet loss. These Chromium H.264 fmtp
+  // hints seed its estimator; the normal RTCP feedback still reduces bitrate
+  // if the real link cannot carry it.
+  const max = Math.round(profile.bitrate / 1000);
+  const start = Math.round(max * 0.65);
+  const min = Math.round(max * 0.35);
+  let changed = 0;
+  const lines = sdp.split(/\r?\n/).map((line) => {
+    if (!/^a=fmtp:\d+ .*profile-level-id=/i.test(line)) return line;
+    changed += 1;
+    const cleaned = line.replace(/;x-google-(?:min|start|max)-bitrate=\d+/gi, '');
+    return `${cleaned};x-google-min-bitrate=${min};x-google-start-bitrate=${start};x-google-max-bitrate=${max}`;
+  });
+  return { sdp: lines.join('\r\n'), changed, min, start, max };
+}
+
+function pairingCode() {
+  return document.getElementById('pairCode').value.replace(/\s/g, '');
+}
 
 function createTestMediaStream() {
   const canvas = document.createElement('canvas');
@@ -80,6 +151,22 @@ function stopTestMedia() {
   if (testMediaFrame !== null) {
     cancelAnimationFrame(testMediaFrame);
     testMediaFrame = null;
+  }
+}
+
+async function limitCapture(stream, profile) {
+  const track = stream.getVideoTracks()[0];
+  if (!track || !track.applyConstraints) return;
+  try {
+    await track.applyConstraints({
+      width: { ideal: profile.width, max: profile.width },
+      height: { ideal: profile.height, max: profile.height },
+      frameRate: { ideal: profile.frameRate, max: profile.frameRate },
+      resizeMode: 'crop-and-scale',
+    });
+    logLine(`[*] ${profile.label} 采集约束已应用`);
+  } catch (e) {
+    logLine('[i] 浏览器未接受采集缩放约束，继续使用原始分辨率');
   }
 }
 
@@ -149,13 +236,49 @@ async function connectWS() {
   return new Promise((resolve, reject) => {
     const url = wsBase + '/ws';
     let opened = false;
+    let paired = false;
+    let pairingFailed = false;
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      fn(value);
+    };
     ws = new WebSocket(url);
-    const timeout = setTimeout(() => { ws.close(); reject(new Error('WS 连接超时')); }, 10000);
-    ws.onopen = () => { opened = true; clearTimeout(timeout); logLine('[*] WS 已连接: ' + url); updateConnInfo(); resolve(); };
-    ws.onerror = () => { clearTimeout(timeout); reject(new Error('WS 连接失败')); };
+    const timeout = setTimeout(() => { ws.close(); finish(reject, new Error('WS 连接超时')); }, 10000);
+    ws.onopen = () => {
+      opened = true;
+      const code = pairingCode();
+      if (!/^\d{8}$/.test(code)) {
+        pairingFailed = true;
+        ws.close();
+        finish(reject, new Error('请输入大屏显示的 8 位投屏码'));
+        return;
+      }
+      logLine('[*] WSS 已连接，验证投屏码...');
+      ws.send(JSON.stringify({ t: 'pair', code }));
+    };
+    ws.onerror = () => finish(reject, new Error('WSS 连接失败'));
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.t === 'pair_ok') {
+          paired = true;
+          logLine('[*] 投屏码验证成功: ' + url);
+          updateConnInfo();
+          finish(resolve);
+        } else if (data.msg === 'pairing_failed' || data.msg === 'pairing_rate_limited') {
+          pairingFailed = true;
+          ws.close();
+          finish(reject, new Error(data.msg === 'pairing_rate_limited' ? '投屏码尝试过多，请 1 分钟后重试' : '投屏码错误'));
+        }
+      } catch (e) { /* Normal protocol handler takes over after pairing. */ }
+    };
     ws.onclose = () => {
-      logLine('[*] WS 断开');
-      if (opened && !stopped && stream) {
+      logLine('[*] WSS 断开');
+      if (!paired) finish(reject, new Error('WSS 在投屏码验证前断开'));
+      if (opened && !pairingFailed && !stopped && stream) {
         logLine('[*] 3秒后重连...');
         setTimeout(async () => {
           try { await connectWS(); setupWSHandler(); } catch(e) { logLine('[!] 重连失败: ' + e); }
@@ -191,7 +314,9 @@ function setupWSHandler() {
 
 function setupPC() {
   if (pc) { try { pc.close(); } catch(e){} }
-  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  // The receiver is on the same LAN/AP; avoid an unnecessary public STUN
+  // lookup and keep ICE on host candidates for faster offline startup.
+  pc = new RTCPeerConnection({ iceServers: [] });
   pc.onicecandidate = (e) => {
     if (!e.candidate) { logLine('[*] ICE 收集完成'); return; }
     logLine('[*] ICE: ' + e.candidate.candidate.substring(0,60));
@@ -200,18 +325,115 @@ function setupPC() {
   pc.oniceconnectionstatechange = () => logLine('[*] ICE state: ' + pc.iceConnectionState);
   pc.onconnectionstatechange = () => {
     logLine('[*] CONN state: ' + pc.connectionState);
-    if (pc.connectionState === 'connected') logLine('[*] ====== P2P 连接成功! ======');
+    if (pc.connectionState === 'connected') {
+      logLine('[*] ====== P2P 连接成功! ======');
+      startStatsReporter();
+    }
+    if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) stopStatsReporter();
   };
-  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+  const videoTrack = stream.getVideoTracks()[0];
+  if (videoTrack) {
+    const transceiver = pc.addTransceiver(videoTrack, { direction: 'sendonly' });
+    try {
+      const codecs = RTCRtpSender.getCapabilities('video')?.codecs || [];
+      const isH264 = (codec) => codec.mimeType?.toLowerCase() === 'video/h264';
+      const h264Codecs = codecs.filter(isH264);
+      // RK MPP is most interoperable with constrained-baseline H.264.  The
+      // browser only receives an ordering preference here: all other locally
+      // supported codecs remain available as a safe fallback.
+      const baselineH264 = h264Codecs.filter((codec) =>
+        /profile-level-id=42(?:e0|c0|00)[0-9a-f]{2}/i.test(codec.sdpFmtpLine || '')
+      );
+      const preferredCodecs = [
+        ...baselineH264,
+        ...h264Codecs.filter((codec) => !baselineH264.includes(codec)),
+        ...codecs.filter((codec) => !isH264(codec)),
+      ];
+      transceiver.setCodecPreferences(preferredCodecs);
+      logLine('[*] H.264 能力: ' + h264Codecs.map((codec) => codec.sdpFmtpLine || '默认').join(' | '));
+      logLine(baselineH264.length
+        ? '[*] 编码偏好: H.264 Constrained Baseline（RK 硬解兼容）'
+        : '[i] 未发现 Baseline H.264 能力，使用浏览器提供的 H.264 兼容档');
+    } catch (e) { logLine('[i] 编码器偏好设置跳过: ' + e.message); }
+    tuneSender(transceiver.sender);
+  }
+  stream.getAudioTracks().forEach(t => pc.addTrack(t, stream));
+}
+
+async function tuneSender(sender) {
+  try {
+    const profile = selectedCaptureProfile();
+    const params = sender.getParameters();
+    // Diagnostics show a clean 2–4 ms LAN RTT and zero packet loss. Favor
+    // motion so Chrome does not intentionally coalesce screen frames.
+    params.degradationPreference = 'maintain-framerate';
+    if (params.encodings?.length) {
+      params.encodings[0].maxFramerate = profile.frameRate;
+      params.encodings[0].maxBitrate = profile.bitrate;
+      params.encodings[0].networkPriority = 'high';
+    }
+    await sender.setParameters(params);
+    logLine(`[*] 发送策略已应用：motion / ${profile.label} / ${Math.round(profile.bitrate / 1000000)}Mbps 上限`);
+  } catch (e) { logLine('[i] 浏览器未接受发送码率策略: ' + e.message); }
+}
+
+function stopStatsReporter() {
+  if (statsTimer !== null) clearInterval(statsTimer);
+  statsTimer = null;
+  lastStatsBytes = 0;
+  lastStatsAt = 0;
+}
+
+async function reportSenderStats() {
+  if (!pc || pc.connectionState !== 'connected') return;
+  try {
+    const reports = await pc.getStats();
+    let outbound = null;
+    let remoteInbound = null;
+    reports.forEach((report) => {
+      if (report.kind !== 'video') return;
+      if (report.type === 'outbound-rtp') outbound = report;
+      if (report.type === 'remote-inbound-rtp') remoteInbound = report;
+    });
+    if (!outbound) return;
+    const now = performance.now();
+    const elapsed = lastStatsAt ? (now - lastStatsAt) / 1000 : 0;
+    const kbps = elapsed > 0 ? Math.round((outbound.bytesSent - lastStatsBytes) * 8 / elapsed / 1000) : 0;
+    lastStatsBytes = outbound.bytesSent || 0;
+    lastStatsAt = now;
+    const stats = {
+      fps: Math.round(outbound.framesPerSecond || 0),
+      kbps,
+      frames_encoded: outbound.framesEncoded || 0,
+      frames_sent: outbound.framesSent || 0,
+      packets_lost: remoteInbound?.packetsLost || 0,
+      packets_received: remoteInbound?.packetsReceived || 0,
+      quality_limit: outbound.qualityLimitationReason || 'none',
+      rtt_ms: remoteInbound?.roundTripTime ? Math.round(remoteInbound.roundTripTime * 1000) : 0,
+    };
+    logLine(`[诊断] ${stats.fps}fps · ${stats.kbps}kbps · 丢包 ${stats.packets_lost}/${stats.packets_received} · 限制 ${stats.quality_limit}`);
+    send({ t: 'sender_stats', s: sessionId, stats });
+  } catch (_) { /* getStats is diagnostic only; never interrupt casting. */ }
+}
+
+function startStatsReporter() {
+  stopStatsReporter();
+  reportSenderStats();
+  statsTimer = setInterval(reportSenderStats, 3000);
 }
 
 async function createOffer() {
   setupPC();
   try {
     const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    logLine('[*] Offer 创建, sdp len=' + offer.sdp.length);
-    send({ t:'offer', s: sessionId, sdp: offer.sdp });
+    const bitrate = applyLanH264Bitrate(offer.sdp, selectedCaptureProfile());
+    const localOffer = { type: offer.type, sdp: bitrate.sdp };
+    await pc.setLocalDescription(localOffer);
+    if (bitrate.changed) {
+      logLine(`[*] 局域网 H.264 码率提示: ${bitrate.min}/${bitrate.start}/${bitrate.max} kbps`);
+    }
+    logLine('[*] Offer 创建, sdp len=' + localOffer.sdp.length);
+    send({ t:'offer', s: sessionId, sdp: localOffer.sdp });
     logLine('[*] Offer 已发送');
   } catch(e) { logLine('[!] createOffer 失败: ' + e); }
 }
@@ -222,17 +444,28 @@ async function start() {
     if (!testMediaMode && !window.isSecureContext) {
       throw new Error('真实屏幕采集需要安全上下文，请使用 https://192.168.1.109:8080/p2p-sender.html；测试媒体可继续使用 HTTP');
     }
-    stream = testMediaMode
-      ? createTestMediaStream()
-      : await navigator.mediaDevices.getDisplayMedia({ video: {cursor:'always'}, audio:true });
-    document.getElementById('video').srcObject = stream;
-    document.getElementById('video').style.display = 'block';
-    logLine(testMediaMode ? '[*] 合成测试画面已启动' : '[*] 屏幕捕获成功');
-
     if (!ws || ws.readyState === WebSocket.CLOSED) {
       await connectWS();
       setupWSHandler();
     }
+
+    const profile = selectedCaptureProfile();
+    stream = testMediaMode
+      ? createTestMediaStream()
+      : await navigator.mediaDevices.getDisplayMedia({ video: captureConstraints(profile), audio:true });
+    if (!testMediaMode) await limitCapture(stream, profile);
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack && 'contentHint' in videoTrack) {
+      videoTrack.contentHint = 'motion';
+      logLine('[*] 屏幕编码设为 motion：优先连续运动帧');
+    }
+    const settings = videoTrack?.getSettings?.() || {};
+    logLine(`[*] 实际采集: ${settings.width || '?'}×${settings.height || '?'} @ ${settings.frameRate || '?'}fps`);
+    const preview = document.getElementById('video');
+    preview.srcObject = localPreviewEnabled ? stream : null;
+    preview.style.display = localPreviewEnabled ? 'block' : 'none';
+    if (!localPreviewEnabled) logLine('[*] 本地预览已关闭，避免整屏采集时产生镜像反馈');
+    logLine(testMediaMode ? '[*] 合成测试画面已启动' : '[*] 屏幕捕获成功');
 
     sessionId = 'p2p_' + Date.now().toString(36);
     document.getElementById('sid').textContent = sessionId;
@@ -251,6 +484,7 @@ function stop() {
   send({ t:'stop', s: sessionId });
   if (pc) { pc.close(); pc = null; }
   if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  stopStatsReporter();
   stopTestMedia();
   if (ws) { ws.close(); ws = null; }
   document.getElementById('video').style.display = 'none';

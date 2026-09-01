@@ -34,6 +34,8 @@ class HardwareInfo:
             "gstreamer_available": False,
             "gst_version": None,
             "mpp_available": False,
+            "mpp_device_available": False,
+            "mpp_decoder": None,
             "rga_available": False,
             "drm_available": False,
         }
@@ -44,8 +46,15 @@ class HardwareInfo:
             caps["gstreamer_available"] = True
             caps["gst_version"] = gst_ver
 
-        # 检测 MPP (Rockchip Media Process Platform)
-        caps["mpp_available"] = self._check_mpp()
+        # A kernel MPP device alone is not enough: the receiver needs a
+        # GStreamer decoder factory that can feed that device.  Keep both
+        # facts visible so the status API does not claim hardware decode just
+        # because /dev/mpp_service exists.
+        caps["mpp_device_available"] = self._check_mpp_device()
+        caps["mpp_decoder"] = self._find_mpp_decoder()
+        caps["mpp_available"] = bool(
+            caps["mpp_device_available"] and caps["mpp_decoder"]
+        )
 
         # 检测 RGA (Rockchip Graphics Acceleration)
         caps["rga_available"] = self._check_rga()
@@ -94,7 +103,7 @@ class HardwareInfo:
             pass
         return None
 
-    def _check_mpp(self):
+    def _check_mpp_device(self):
         checks = [
             "/sys/class/video4linux/video10",
             "/dev/mpp_service",
@@ -104,6 +113,16 @@ class HardwareInfo:
         if found:
             logger.info("Rockchip MPP: 检测到")
         return found
+
+    def _find_mpp_decoder(self):
+        # Newer Rockchip MPP plugin uses one multi-codec element; older BSP
+        # images expose per-codec factories.  The order mirrors the HDMI
+        # receiver's selection order.
+        for plugin_name in ("mppvideodec", "rkmpph264dec", "v4l2h264dec"):
+            if self._check_gst_plugin(plugin_name):
+                logger.info("硬件解码器: %s", plugin_name)
+                return plugin_name
+        return None
 
     def _check_rga(self):
         checks = [
@@ -147,15 +166,21 @@ class HardwareInfo:
         if not self._detected:
             self.detect()
 
-        if self._capabilities.get("mpp_available"):
-            return "rkmpph264dec"
+        decoder = self._capabilities.get("mpp_decoder")
+        if decoder:
+            return decoder
         return "avdec_h264"
 
     def get_gst_decode_element_h265(self):
         if not self._detected:
             self.detect()
-        if self._capabilities.get("mpp_available"):
+        decoder = self._capabilities.get("mpp_decoder")
+        if decoder == "mppvideodec":
+            return decoder
+        if decoder == "rkmpph264dec" and self._check_gst_plugin("rkmpph265dec"):
             return "rkmpph265dec"
+        if decoder == "v4l2h264dec" and self._check_gst_plugin("v4l2h265dec"):
+            return "v4l2h265dec"
         return "avdec_h265"
 
     def get_gst_scale_element(self):
@@ -193,6 +218,7 @@ class HardwareInfo:
             f"平台: {c.get('platform', 'Unknown')} ({c.get('machine', 'Unknown')})",
             f"GStreamer: {'可用 ' + str(c['gst_version']) if c.get('gstreamer_available') else '未安装'}",
             f"MPP 硬解: {'可用' if c.get('mpp_available') else '不可用'}",
+            f"MPP 解码器: {c.get('mpp_decoder') or '未安装'}",
             f"RGA 硬缩放: {'可用' if c.get('rga_available') else '不可用'}",
             f"DRM/KMS 显示: {'可用' if c.get('drm_available') else '不可用'}",
         ]

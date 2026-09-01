@@ -5,15 +5,21 @@ aiohttp HTTP/WebSocket 服务 + WHEP (RFC 9372) 信令
 """
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
 import signal
+import shutil
 import socket
+import ssl
 import subprocess
 import time
+import plistlib
+import uuid
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -24,6 +30,9 @@ from gst.compositor import CompositorManager
 from gst.audio_mixer import AudioManager
 from mdns_service import start_mdns, stop_mdns
 from receivers import ReceiverSupervisor
+from device_runtime import DeviceRuntime
+from network_mode import detect_network_status
+from pairing import PairingManager
 
 # ========================================
 # 日志
@@ -36,6 +45,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 RECEIVER_SUPERVISOR_KEY = web.AppKey("receiver_supervisor", ReceiverSupervisor)
+DEVICE_RUNTIME_KEY = web.AppKey("device_runtime", DeviceRuntime)
+PAIRING_MANAGER_KEY = web.AppKey("pairing_manager", PairingManager)
 
 # ========================================
 # 路径
@@ -144,11 +155,50 @@ def get_local_ip():
             s.close()
 
 
+def _is_loopback_peer(peer):
+    """Whether a request comes from the board itself."""
+    if not peer:
+        return False
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return peer.lower() == "localhost"
+
+
+def _is_loopback_request(request):
+    return _is_loopback_peer(request.remote)
+
+
+def _require_loopback(request):
+    """Keep legacy/control-only HTTP APIs off the LAN attack surface."""
+    if _is_loopback_request(request):
+        return None
+    return web.json_response({"error": "local access only"}, status=403)
+
+
+def _origin_allowed(request):
+    """Apply browser-origin hardening to an external signaling socket."""
+    if _is_loopback_request(request):
+        return True
+    origin = request.headers.get("Origin")
+    if not origin:
+        return False
+    parsed = urlsplit(origin)
+    if parsed.scheme == "https" and origin.rstrip("/") == f"https://{request.host}".rstrip("/"):
+        return True
+    return parsed.scheme == "http" and (parsed.hostname or "").lower() in {
+        "localhost", "127.0.0.1", "::1",
+    }
+
+
 # ========================================
 # WHEP API (RFC 9372)
 # ========================================
 async def whep_create_session(request):
     """POST /api/sessions - 创建 WHEP 投屏会话"""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
     # 检查并发上限
     max_sessions = config.max_sessions
     if receiver_manager.session_count >= max_sessions:
@@ -208,6 +258,9 @@ async def whep_create_session(request):
 
 async def whep_patch_session(request):
     """PATCH /api/sessions/{id} - 添加 ICE candidates (trickle ICE)"""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
     session_id = request.match_info["id"]
     receiver = await receiver_manager.get_session(session_id)
 
@@ -233,6 +286,9 @@ async def whep_patch_session(request):
 
 async def whep_delete_session(request):
     """DELETE /api/sessions/{id} - 断开会话"""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
     session_id = request.match_info["id"]
     removed = await receiver_manager.remove_session(session_id)
 
@@ -391,8 +447,9 @@ async def api_system(request):
     except Exception:
         result["disk"] = {"total_gb": 0, "used_gb": 0, "percent": 0}
 
-    # Network
+    # Network topology (read-only; does not alter routes or connections)
     result["ip"] = get_local_ip()
+    result["network"] = detect_network_status().to_dict()
 
     # Uptime
     result["service_uptime"] = _get_uptime()
@@ -441,16 +498,134 @@ async def server_info(request):
 
 async def api_device_info(request):
     """GET /api/device-info - onboarding information for senders/standby UI."""
+    runtime = request.app[DEVICE_RUNTIME_KEY]
+    network = detect_network_status()
     return web.json_response({
         "name": config.device_name,
         "ssid": config.ap_ssid,
         "password": config.ap_password,
         "address": config.ap_address,
         "https_url": f"https://{config.ap_address}:{config.http_port}",
-        "ws_url": f"ws://{config.ap_address}:{config.ws_port}/ws",
-        "active_session": _display_room_id,
-        "available": _display_process is None or _display_process.poll() is not None,
+        "ws_url": f"wss://{config.ap_address}:{config.http_port}/ws",
+        "pairing_required": True,
+        "pairing_code_digits": 8,
+        "network": network.to_dict(),
+        "active_session": runtime.active_session_id or _display_room_id,
+        "available": runtime.available,
     })
+
+
+async def api_device_runtime(request):
+    """GET /api/device/runtime - product-level state and runtime metrics."""
+    return web.json_response(request.app[DEVICE_RUNTIME_KEY].snapshot())
+
+
+async def api_device_telemetry(request):
+    """POST /api/device/telemetry - ingest metrics and return a dry-run profile."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "invalid JSON body"}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": "telemetry must be an object"}, status=400)
+    runtime = request.app[DEVICE_RUNTIME_KEY]
+    recommendation = runtime.update_telemetry(body)
+    return web.json_response({
+        "status": "accepted",
+        "adaptation": recommendation,
+    })
+
+
+def _wifi_qr_escape(value):
+    """Escape a value for the WIFI QR payload grammar."""
+    return str(value).replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace(":", "\\:")
+
+
+async def api_device_wifi_qr(request):
+    """GET /api/device/wifi-qr.svg - local QR for the device AP."""
+    payload = "WIFI:T:WPA;S:%s;P:%s;;" % (
+        _wifi_qr_escape(config.ap_ssid),
+        _wifi_qr_escape(config.ap_password),
+    )
+    if shutil.which("qrencode"):
+        try:
+            result = subprocess.run(
+                ["qrencode", "-t", "SVG", "-o", "-", payload],
+                capture_output=True,
+                timeout=3,
+                check=True,
+            )
+            return web.Response(
+                body=result.stdout,
+                content_type="image/svg+xml",
+                headers={"Cache-Control": "no-store", "X-QR-Available": "true"},
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            pass
+    # The board package installs qrencode and returns a scannable QR. Keep the
+    # development page visually complete when the CLI is absent on a laptop.
+    fallback = """<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 240 240\"><rect width=\"240\" height=\"240\" fill=\"#f5f7ff\"/><rect x=\"24\" y=\"24\" width=\"192\" height=\"192\" rx=\"8\" fill=\"none\" stroke=\"#18284e\" stroke-width=\"3\"/><path d=\"M52 68h34v34H52zM154 68h34v34h-34zM52 154h34v34H52zM108 108h24v24h-24zM152 146h12v12h-12zM112 164h12v12h-12z\" fill=\"#18284e\"/><text x=\"120\" y=\"132\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"9\" fill=\"#18284e\">QR ON DEVICE</text></svg>"""
+    return web.Response(
+        text=fallback,
+        content_type="image/svg+xml",
+        headers={"Cache-Control": "no-store", "X-QR-Available": "false"},
+    )
+
+
+async def api_pairing_code(request):
+    """Return the display code only to the local standby kiosk."""
+    denied = _require_loopback(request)
+    if denied:
+        return denied
+    return web.json_response({"code": request.app[PAIRING_MANAGER_KEY].code})
+
+
+async def api_device_ca(request):
+    """Expose the public local CA certificate for one-time client onboarding."""
+    ca_file = Path(__file__).resolve().parent / "ca.pem"
+    if not ca_file.exists():
+        raise web.HTTPNotFound(text="device CA certificate is unavailable")
+    return web.FileResponse(
+        ca_file,
+        headers={"Content-Disposition": "attachment; filename=rk-screencast-ca.pem"},
+    )
+
+
+async def api_ios_ca_profile(request):
+    """Download-only iOS profile containing the device's public root CA."""
+    ca_file = Path(__file__).resolve().parent / "ca.pem"
+    if not ca_file.exists():
+        raise web.HTTPNotFound(text="device CA certificate is unavailable")
+    try:
+        certificate_der = ssl.PEM_cert_to_DER_cert(ca_file.read_text())
+    except (OSError, ValueError) as exc:
+        logger.error("Unable to build iOS CA profile: %s", exc)
+        raise web.HTTPInternalServerError(text="device CA certificate is invalid")
+
+    profile_id = "com.rk.screencast.local-ca"
+    certificate_payload = {
+        "PayloadType": "com.apple.security.root",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": profile_id + ".certificate",
+        "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, profile_id + ".certificate")),
+        "PayloadDisplayName": "RK Screencast Local CA",
+        "PayloadCertificateFileName": "rk-screencast-ca.cer",
+        "PayloadContent": certificate_der,
+    }
+    profile = {
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": profile_id,
+        "PayloadUUID": str(uuid.uuid5(uuid.NAMESPACE_URL, profile_id)),
+        "PayloadDisplayName": "RK Screencast Local CA",
+        "PayloadDescription": "Trust this device's local HTTPS certificate.",
+        "PayloadContent": [certificate_payload],
+    }
+    return web.Response(
+        body=plistlib.dumps(profile),
+        content_type="application/x-apple-aspen-config",
+        headers={"Content-Disposition": "attachment; filename=rk-screencast-ca.mobileconfig"},
+    )
 
 
 # ========================================
@@ -458,27 +633,48 @@ async def api_device_info(request):
 # ========================================
 async def ws_handler(request):
     """WebSocket 信令端点 (兼容旧版浏览器端)"""
+    is_local = _is_loopback_request(request)
+    if not is_local and (not request.secure or not _origin_allowed(request)):
+        raise web.HTTPForbidden(text="secure, allowed-origin WebSocket required")
+
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
     peer = request.remote or "unknown"
     cid = _register_ws(ws, peer)
     receiver_supervisor = request.app.get(RECEIVER_SUPERVISOR_KEY)
+    device_runtime = request.app[DEVICE_RUNTIME_KEY]
     print(f"[WS] 连接: cid={cid} from {peer}", flush=True)
     logger.info("[WS] 客户端连接: cid=%s from %s", cid, peer)
 
+    authenticated = is_local
+    pairing = request.app[PAIRING_MANAGER_KEY]
     try:
         async for msg in ws:
             if msg.type == web.WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
-                    await handle_ws_message(cid, data, receiver_supervisor)
+                    if not authenticated:
+                        if data.get("t") != "pair":
+                            await ws.send_json({"t": "error", "msg": "pairing_required"})
+                            continue
+                        authenticated, result = pairing.verify(data.get("code"), peer)
+                        if authenticated:
+                            await ws.send_json({"t": "pair_ok"})
+                        else:
+                            await ws.send_json({"t": "error", "msg": result})
+                        continue
+                    await handle_ws_message(
+                        cid, data, receiver_supervisor, device_runtime
+                    )
                 except json.JSONDecodeError:
                     await ws.send_json({"type": "error", "message": "invalid json"})
             elif msg.type == web.WSMsgType.ERROR:
                 logger.error("[WS] 错误: %s", ws.exception())
     finally:
-        await handle_ws_disconnect(ws, cid, receiver_supervisor)
+        await handle_ws_disconnect(
+            ws, cid, receiver_supervisor, device_runtime
+        )
         logger.info("[WS] 客户端断开: cid=%s", cid)
 
     return ws
@@ -509,7 +705,9 @@ def _msg_for(fmt, t_short, t_long, sid, **kw):
     return _make_long(t_long, sid, **kw)
 
 
-async def handle_ws_message(cid, data, receiver_supervisor=None):
+async def handle_ws_message(
+    cid, data, receiver_supervisor=None, device_runtime=None
+):
     """处理 WebSocket 消息 - 同时支持 long 和 short 两种消息格式"""
     fmt = _detect_format(data)
     if fmt == "short":
@@ -524,6 +722,19 @@ async def handle_ws_message(cid, data, receiver_supervisor=None):
 
     if msg_type == "ping":
         await _send_to(cid, {"type": "pong"})
+        return
+
+    # Browser WebRTC counters are the authoritative way to distinguish a
+    # constrained encoder from packet loss. Keep only compact aggregates in
+    # the journal; media never traverses this signaling channel.
+    if msg_type == "sender_stats":
+        stats = data.get("stats", {})
+        if isinstance(stats, dict):
+            logger.info("[SenderStats] sid=%s fps=%s kbps=%s encoded=%s sent=%s loss=%s/%s limit=%s rtt=%s",
+                        sid, stats.get("fps"), stats.get("kbps"),
+                        stats.get("frames_encoded"), stats.get("frames_sent"),
+                        stats.get("packets_lost"), stats.get("packets_received"),
+                        stats.get("quality_limit"), stats.get("rtt_ms"))
         return
 
     # WHEP over WebSocket (兼容模式) - 仅 long format
@@ -618,7 +829,9 @@ async def handle_ws_message(cid, data, receiver_supervisor=None):
                     {"codec": config.preferred_codec},
                 )
             else:
-                asyncio.ensure_future(_auto_start_display(sid))
+                if device_runtime is not None:
+                    device_runtime.begin_session(sid)
+                asyncio.ensure_future(_auto_start_display(sid, device_runtime))
         sdp = data.get("sdp", "")
         offer_msgs = {
             "short": _make_short("offer", sid, sdp=sdp),
@@ -634,6 +847,20 @@ async def handle_ws_message(cid, data, receiver_supervisor=None):
                     if imsg:
                         await _send_to(vcid, imsg)
         print(f"[ROOM] offer: room={sid} cid={cid} viewers={len(room.viewers)} sdp_len={len(sdp)}", flush=True)
+        return
+
+    # Native HDMI worker reports actual media-pipeline readiness.
+    if msg_type == "receiver_status":
+        if room is None or cid not in room.viewers or device_runtime is None:
+            return
+        reported_state = data.get("state")
+        details = data.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        if reported_state == "playing":
+            device_runtime.mark_session_playing(sid, details)
+        elif reported_state == "failed":
+            device_runtime.fail_session(sid, details)
         return
 
     # viewer 发送 answer
@@ -682,6 +909,8 @@ async def handle_ws_message(cid, data, receiver_supervisor=None):
                 await receiver_supervisor.stop(sid)
             elif _display_room_id == sid:
                 asyncio.ensure_future(_stop_display())
+                if device_runtime is not None:
+                    device_runtime.end_session(sid)
             room.sender = None
             room.pending_offer = {}
             room.pending_ice = []
@@ -696,7 +925,9 @@ async def handle_ws_message(cid, data, receiver_supervisor=None):
     logger.warning("[WS] 未知消息类型: %s", msg_type)
 
 
-async def handle_ws_disconnect(ws, cid, receiver_supervisor=None):
+async def handle_ws_disconnect(
+    ws, cid, receiver_supervisor=None, device_runtime=None
+):
     """清理断开连接"""
     # WHEP 会话清理
     session_ids = ws_sessions.pop(cid, set())
@@ -717,6 +948,8 @@ async def handle_ws_disconnect(ws, cid, receiver_supervisor=None):
                     await receiver_supervisor.stop(room_id)
                 elif _display_room_id == room_id:
                     asyncio.ensure_future(_stop_display())
+                    if device_runtime is not None:
+                        device_runtime.end_session(room_id)
                 room.sender = None
                 room.pending_offer = {}
                 room.pending_ice = []
@@ -737,6 +970,8 @@ async def handle_ws_disconnect(ws, cid, receiver_supervisor=None):
 # ========================================
 async def terminal_ws_handler(request):
     """终端 WebSocket 端点 - 接收 PC 端转发的终端输出"""
+    if not _is_loopback_request(request):
+        raise web.HTTPForbidden(text="local WebSocket required")
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
@@ -837,6 +1072,14 @@ async def p2p_sender_handler(request):
     return web.Response(text="P2P sender not found", status=404)
 
 
+async def standby_handler(request):
+    """独立待机引导页，可在浏览器或 kiosk 渲染器中运行。"""
+    path = FRONTEND_DIR / "standby.html"
+    if path.exists():
+        return web.FileResponse(path)
+    return web.Response(text="Standby page not found", status=404)
+
+
 # ========================================
 # HDMI 显示管理
 # ========================================
@@ -865,7 +1108,7 @@ async def display_handler(request):
 
 async def api_display_start(request):
     """POST /api/display/start - 启动 HDMI 原生显示 (GStreamer webrtcbin + kmssink)"""
-    global _display_process
+    global _display_process, _display_room_id
     try:
         body = await request.json()
     except Exception:
@@ -877,6 +1120,7 @@ async def api_display_start(request):
 
     await _stop_display(restore_standby=False)
     _control_standby("stop")
+    request.app[DEVICE_RUNTIME_KEY].begin_session(sid)
 
     # 使用纯 HTTP 端口的 WebSocket
     ws_url = f"ws://localhost:{config.ws_port}/ws"
@@ -896,13 +1140,27 @@ async def api_display_start(request):
             with open("/tmp/hdmi_receiver.log") as f:
                 log_content = f.read()
             logger.error("[DISPLAY] receiver failed: %s", log_content[-500:])
+            request.app[DEVICE_RUNTIME_KEY].fail_session(
+                sid,
+                {
+                    "reason": "display_worker_exited",
+                    "exit_code": _display_process.returncode,
+                },
+            )
             return web.json_response({"error": f"receiver failed: {log_content[-200:]}"}, status=500)
 
+        _display_room_id = sid
         logger.info("[DISPLAY] started pid=%d sid=%s", _display_process.pid, sid)
         return web.json_response({"status": "started", "pid": _display_process.pid, "sid": sid})
     except FileNotFoundError as e:
+        request.app[DEVICE_RUNTIME_KEY].fail_session(
+            sid, {"reason": "display_worker_not_found"}
+        )
         return web.json_response({"error": f"{e.strerror}: python3 or hdmi_receiver.py not found"}, status=500)
     except Exception as e:
+        request.app[DEVICE_RUNTIME_KEY].fail_session(
+            sid, {"reason": "display_worker_start_failed", "error": str(e)}
+        )
         return web.json_response({"error": str(e)}, status=500)
 
 
@@ -931,7 +1189,7 @@ async def _stop_display(restore_standby=True):
         _control_standby("start")
 
 
-async def _auto_start_display(sid):
+async def _auto_start_display(sid, device_runtime=None):
     """Auto-start HDMI display when sender begins sharing."""
     global _display_process, _display_room_id
 
@@ -954,11 +1212,18 @@ async def _auto_start_display(sid):
         logger.info("[DISPLAY] auto-started pid=%d room=%s", _display_process.pid, sid)
     except Exception as e:
         logger.error("[DISPLAY] auto-start failed: %s", e)
+        if device_runtime is not None:
+            device_runtime.fail_session(
+                sid, {"reason": "display_worker_start_failed", "error": str(e)}
+            )
 
 
 async def api_display_stop(request):
     """DELETE /api/display/stop - 停止 HDMI 显示"""
+    stopped_session = _display_room_id
     await _stop_display(restore_standby=True)
+    if stopped_session:
+        request.app[DEVICE_RUNTIME_KEY].end_session(stopped_session)
     return web.json_response({"status": "stopped"})
 
 
@@ -1035,10 +1300,15 @@ def _get_uptime():
     return int(time.time() - _start_time)
 
 
-def create_app(receiver_supervisor=None):
+def create_app(receiver_supervisor=None, device_runtime=None, pairing_manager=None):
     app = web.Application()
 
+    runtime = device_runtime or DeviceRuntime()
+    app[DEVICE_RUNTIME_KEY] = runtime
+    app[PAIRING_MANAGER_KEY] = pairing_manager or PairingManager()
+
     if receiver_supervisor is not None:
+        receiver_supervisor.set_event_handler(runtime.handle_receiver_event)
         app[RECEIVER_SUPERVISOR_KEY] = receiver_supervisor
 
     # REST API (WHEP)
@@ -1057,6 +1327,12 @@ def create_app(receiver_supervisor=None):
     app.router.add_get("/health", health_check)
     app.router.add_get("/info", server_info)
     app.router.add_get("/api/device-info", api_device_info)
+    app.router.add_get("/api/device/runtime", api_device_runtime)
+    app.router.add_post("/api/device/telemetry", api_device_telemetry)
+    app.router.add_get("/api/device/wifi-qr.svg", api_device_wifi_qr)
+    app.router.add_get("/api/device/pairing-code", api_pairing_code)
+    app.router.add_get("/api/device/ca.pem", api_device_ca)
+    app.router.add_get("/api/device/ios-ca.mobileconfig", api_ios_ca_profile)
 
     # WebSocket
     app.router.add_get("/ws", ws_handler)
@@ -1070,6 +1346,8 @@ def create_app(receiver_supervisor=None):
     app.router.add_get("/dashboard.html", dashboard_html_handler)
     app.router.add_get("/terminal-view.html", terminal_view_handler)
     app.router.add_get("/p2p-sender.html", p2p_sender_handler)
+    app.router.add_get("/standby", standby_handler)
+    app.router.add_get("/standby.html", standby_handler)
     app.router.add_get("/status.html", status_html_handler)
     app.router.add_get("/p2p-view.html", p2p_view_handler)
     app.router.add_get("/display.html", display_handler)
@@ -1110,6 +1388,7 @@ async def on_startup(app):
 
 async def on_cleanup(app):
     logger.info("关闭所有会话...")
+    app[DEVICE_RUNTIME_KEY].mark_stopping()
     await receiver_manager.stop_all()
 
     receiver_supervisor = app.get(RECEIVER_SUPERVISOR_KEY)
@@ -1142,9 +1421,8 @@ async def main():
     print("")
     print("[接入方式]")
     print(f"  本机 IP:        {local_ip}")
-    print(f"  Web 界面:       http://{local_ip}:{http_port}")
-    print(f"  WebSocket:      ws://{local_ip}:{http_port}/ws")
-    print(f"  WHEP 端点:      http://{local_ip}:{http_port}/api/sessions")
+    print(f"  Web 界面:       https://{local_ip}:{http_port}")
+    print(f"  WebSocket:      wss://{local_ip}:{http_port}/ws")
     print(f"  状态面板:       http://{local_ip}:{http_port}/dashboard")
     print("")
     print("[硬件]")
@@ -1163,23 +1441,26 @@ async def main():
     print("=" * 55)
     print("")
 
-    app = create_app()
-    ssl_ctx = None
     ssl_crt = Path(__file__).resolve().parent / "cert.pem"
     ssl_key = Path(__file__).resolve().parent / "key.pem"
-    if ssl_crt.exists() and ssl_key.exists():
-        import ssl
-        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(str(ssl_crt), str(ssl_key))
-        print("[SSL] HTTPS 已启用")
-        print("")
+    if not (ssl_crt.exists() and ssl_key.exists()):
+        raise RuntimeError("external casting requires backend/cert.pem and backend/key.pem")
+    import ssl
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_ctx.load_cert_chain(str(ssl_crt), str(ssl_key))
+    app = create_app(pairing_manager=PairingManager(
+        code_file=Path("/run/screencast/pairing-code")
+    ))
+    print("[SSL] HTTPS/WSS 已启用；外部投屏需要待机画面的投屏码")
+    print("")
 
-    # 同时监听 HTTP 端口 (config.ws_port) 供本地 HDMI 显示使用
+    # 8081 is only for the board-local HDMI receiver. All external clients
+    # use the TLS listener above, eliminating plaintext LAN signaling.
     runner = web.AppRunner(app)
     await runner.setup()
     sites = []
     sites.append(web.TCPSite(runner, config.server_host, http_port, ssl_context=ssl_ctx))
-    sites.append(web.TCPSite(runner, config.server_host, config.ws_port, ssl_context=None))
+    sites.append(web.TCPSite(runner, "127.0.0.1", config.ws_port, ssl_context=None))
     print(f"[HTTP] 本地显示端口: http://localhost:{config.ws_port}")
     for site in sites:
         await site.start()

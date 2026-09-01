@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Native HDMI display receiver - GStreamer WebRTC + kmssink (no browser)."""
-import asyncio, json, logging, os, re, socket, subprocess, sys
+import asyncio, json, logging, os, re, socket, subprocess, sys, threading, time
 import websockets
 
 logging.basicConfig(level=logging.INFO, format="[HDMI] %(message)s")
@@ -19,6 +19,9 @@ Gst.init(None)
 DISPLAY_W = int(os.environ.get("SCREENCAST_DISPLAY_WIDTH", "1024"))
 DISPLAY_H = int(os.environ.get("SCREENCAST_DISPLAY_HEIGHT", "600"))
 PLANE_ID = int(os.environ.get("SCREENCAST_KMS_PLANE_ID", "71"))
+LAN_H264_MIN_KBPS = int(os.environ.get("SCREENCAST_LAN_H264_MIN_KBPS", "10500"))
+LAN_H264_START_KBPS = int(os.environ.get("SCREENCAST_LAN_H264_START_KBPS", "19500"))
+LAN_H264_MAX_KBPS = int(os.environ.get("SCREENCAST_LAN_H264_MAX_KBPS", "30000"))
 
 
 class NativeReceiver:
@@ -35,6 +38,57 @@ class NativeReceiver:
         self._ice_queue = []       # 缓存 set-remote-description 完成前的 ICE
         self._remote_desc_set = False
         self._sender_ip = ""
+        self._frame_stats_lock = threading.Lock()
+        self._frame_stats_started = time.monotonic()
+        self._frames_decoded = 0
+        self._frames_presented = 0
+
+    def _note_frame(self, stage):
+        """Count decode/display buffers without adding another media queue."""
+        with self._frame_stats_lock:
+            if stage == "decoded":
+                self._frames_decoded += 1
+            else:
+                self._frames_presented += 1
+            elapsed = time.monotonic() - self._frame_stats_started
+            if elapsed >= 3.0:
+                log.info("FrameStats: decoded=%d (%.1ffps) presented=%d (%.1ffps)",
+                         self._frames_decoded, self._frames_decoded / elapsed,
+                         self._frames_presented, self._frames_presented / elapsed)
+                self._frame_stats_started = time.monotonic()
+                self._frames_decoded = 0
+                self._frames_presented = 0
+
+    def _on_decoded_buffer(self, _pad, _info):
+        self._note_frame("decoded")
+        return Gst.PadProbeReturn.OK
+
+    def _on_presented_buffer(self, _pad, _info):
+        self._note_frame("presented")
+        return Gst.PadProbeReturn.OK
+
+    @staticmethod
+    def _with_lan_h264_bitrate_hints(sdp_text):
+        """Put Chromium LAN bitrate hints in the receiver's SDP answer.
+
+        GStreamer 1.16 does not provide Chrome with a useful initial video
+        bandwidth estimate on every build.  These answer-side H.264 fmtp
+        hints prevent Chrome from immediately downscaling a clean LAN stream
+        to sub-Mbps. RTCP feedback remains free to lower bitrate if needed.
+        """
+        changed = 0
+        lines = []
+        for line in sdp_text.splitlines():
+            if line.startswith("a=fmtp:") and "profile-level-id=" in line.lower():
+                line = re.sub(r";x-google-(?:min|start|max)-bitrate=\d+", "", line,
+                              flags=re.IGNORECASE)
+                line += (";x-google-min-bitrate=%d;x-google-start-bitrate=%d;"
+                         "x-google-max-bitrate=%d" % (
+                             LAN_H264_MIN_KBPS, LAN_H264_START_KBPS,
+                             LAN_H264_MAX_KBPS))
+                changed += 1
+            lines.append(line)
+        return "\r\n".join(lines) + "\r\n", changed
 
     def _send_signaling(self, msg):
         if self.loop and not self.loop.is_closed():
@@ -65,9 +119,75 @@ class NativeReceiver:
         self.pipe = Gst.Pipeline.new("hdmi-receiver")
         self.webrtc = Gst.ElementFactory.make("webrtcbin", "recv")
         self.webrtc.set_property("bundle-policy", "max-bundle")
+        # GStreamer 1.16 does not expose the jitterbuffer latency property on
+        # every webrtcbin build.  Set it when available and also tune any
+        # dynamically-created rtpjitterbuffer in _on_deep_element_added.
+        if self.webrtc.find_property("latency"):
+            self.webrtc.set_property("latency", 80)
+        self.webrtc.connect("deep-element-added", self._on_deep_element_added)
         self.pipe.add(self.webrtc)
         self.webrtc.connect("on-ice-candidate", self._on_ice_candidate)
         self.webrtc.connect("pad-added", self._on_pad_added)
+
+    def _on_deep_element_added(self, _bin, _sub_bin, element):
+        """Keep WebRTC's RTP jitterbuffer bounded for interactive display."""
+        try:
+            factory = element.get_factory()
+            name = factory.get_name() if factory else ""
+            if name == "rtpjitterbuffer":
+                if element.find_property("latency"):
+                    element.set_property("latency", 80)
+                if element.find_property("drop-on-latency"):
+                    # RTP H.264 packets contain reference frames. Dropping a
+                    # late compressed packet corrupts the following GOP and
+                    # is worse than adding a bounded 80 ms of jitter delay.
+                    element.set_property("drop-on-latency", False)
+                if element.find_property("faststart-min-packets"):
+                    element.set_property("faststart-min-packets", 1)
+                log.info("Low-latency RTP jitterbuffer enabled")
+        except Exception as exc:
+            log.debug("Unable to tune RTP jitterbuffer: %s", exc)
+
+    @staticmethod
+    def _make_decoder(encoding):
+        """Use an installed hardware decoder, otherwise a tuned software one."""
+        candidates = {
+            # ``mppvideodec`` is the modern Rockchip MPP element.  It is a
+            # multi-codec decoder and is supplied by libgstrockchipmpp.so.
+            # Keep the older per-codec factory names for vendor images that
+            # ship a different Rockchip plugin, then retain software fallback.
+            "H264": ("mppvideodec", "rkmpph264dec", "v4l2h264dec", "avdec_h264"),
+            "H265": ("mppvideodec", "rkmpph265dec", "v4l2h265dec", "avdec_h265"),
+            "VP8": ("mppvideodec", "vp8dec", "avdec_vp8"),
+            "VP9": ("mppvideodec", "vp9dec", "avdec_vp9"),
+        }.get(encoding, ())
+        preference = os.getenv("SCREENCAST_VIDEO_DECODER", "auto").lower()
+        if preference == "software":
+            candidates = tuple(name for name in candidates if name.startswith("avdec_"))
+        elif preference == "hardware":
+            candidates = tuple(name for name in candidates if not name.startswith("avdec_"))
+        for factory_name in candidates:
+            decoder = Gst.ElementFactory.make(factory_name, None)
+            if decoder:
+                if factory_name.startswith("vp8") and decoder.find_property("threads"):
+                    decoder.set_property("threads", 4)
+                if factory_name.startswith("vp8") and decoder.find_property("post-processing"):
+                    decoder.set_property("post-processing", False)
+                if factory_name.startswith("avdec") and decoder.find_property("max-threads"):
+                    decoder.set_property("max-threads", 4)
+                log.info("Decoder selected: %s", factory_name)
+                return decoder
+        return None
+
+    @staticmethod
+    def _make_live_queue(name):
+        queue = Gst.ElementFactory.make("queue", name)
+        if queue:
+            queue.set_property("max-size-buffers", 1)
+            queue.set_property("max-size-bytes", 0)
+            queue.set_property("max-size-time", 0)
+            queue.set_property("leaky", 2)  # downstream: drop stale frames
+        return queue
 
     def _cleanup_decode_chain(self):
         for e in self._decode_elems:
@@ -91,45 +211,136 @@ class NativeReceiver:
 
             self._cleanup_decode_chain()
 
-            depay = dec = conv = scale = capsf = sink = None
+            depay = parser = codec_caps = dec = render_queue = conv = scale = capsf = sink = None
             if encoding == "H264":
                 depay = Gst.ElementFactory.make("rtph264depay", None)
-                dec = Gst.ElementFactory.make("avdec_h264", None)
+                # MPP requires access units with the ``parsed`` caps flag.
+                # h264parse does this without adding a frame queue.
+                parser = Gst.ElementFactory.make("h264parse", None)
             elif encoding == "H265":
                 depay = Gst.ElementFactory.make("rtph265depay", None)
-                dec = Gst.ElementFactory.make("avdec_h265", None)
+                parser = Gst.ElementFactory.make("h265parse", None)
             elif encoding == "VP8":
                 depay = Gst.ElementFactory.make("rtpvp8depay", None)
-                dec = Gst.ElementFactory.make("vp8dec", None)
             elif encoding == "VP9":
                 depay = Gst.ElementFactory.make("rtpvp9depay", None)
-                dec = Gst.ElementFactory.make("vp9dec", None)
             else:
                 log.error("Unsupported codec: %s", encoding)
                 return
 
-            conv = Gst.ElementFactory.make("videoconvert", None)
-            scale = Gst.ElementFactory.make("videoscale", None)
-            capsf = Gst.ElementFactory.make("capsfilter", None)
+            dec = self._make_decoder(encoding)
+            render_queue = self._make_live_queue("render-q")
+
             sink = Gst.ElementFactory.make("kmssink", None)
-            if not all([depay, dec, conv, scale, capsf, sink]):
+            # The RK MPP decoder exports NV12.  On this board's Esmart KMS
+            # plane, an NV12 DMA buffer may negotiate successfully yet never
+            # produce a DRM framebuffer.  The standby renderer's RGB path is
+            # proven on the same plane, so make the final scanout buffer BGRx
+            # by default.  MPP still performs the expensive decode in
+            # hardware; only the final display conversion is CPU-side.
+            # ARGB is advertised by this BSP's KMS plane but doesn't produce
+            # scanout frames through kmssink. BGRx is the verified working
+            # path; alpha blending is handled separately by plane properties.
+            render_format = os.getenv("SCREENCAST_RENDER_FORMAT", "BGRx")
+            if render_format.lower() in ("native", "nv12", "auto"):
+                render_format = ""
+            # Native mode retains the MPP decoder's NV12 buffer up to the RK
+            # overlay plane. This zero-copy fast path avoids a full CPU core
+            # being spent on the final NV12 -> BGRx conversion.
+            if render_format:
+                conv = Gst.ElementFactory.make("videoconvert", None)
+            if render_format:
+                capsf = Gst.ElementFactory.make("capsfilter", None)
+            force_software_scale = os.getenv("SCREENCAST_SOFTWARE_SCALE", "0").lower() in ("1", "true", "yes")
+            if force_software_scale:
+                scale = Gst.ElementFactory.make("videoscale", None)
+            if not all([depay, dec, render_queue, sink]) or (render_format and not conv) or (encoding in ("H264", "H265") and not parser) or (force_software_scale and not scale) or (render_format and not capsf):
                 log.error("Missing elements for %s", encoding)
                 return
 
-            sink.set_property("plane-id", PLANE_ID)
-            scale.set_property("add-borders", False)
-            capsf.set_property("caps", Gst.Caps.from_string(
-                "video/x-raw, width=%d, height=%d" % (DISPLAY_W, DISPLAY_H)))
+            if parser and parser.find_property("config-interval"):
+                # Keep parameter sets with every IDR so a receiver that
+                # joins/reconnects can decode immediately.
+                parser.set_property("config-interval", -1)
 
-            elems = [depay, dec, conv, scale, capsf, sink]
+            if parser:
+                # Browser WebRTC normally carries H.264 as AVC/avcC.  The
+                # RK MPP plugin advertises AVC support, but on this BSP it
+                # accepts the sequence header and then emits no frames from
+                # live avcC input.  Feed its proven Annex-B path instead.
+                codec_caps = Gst.ElementFactory.make("capsfilter", None)
+                if not codec_caps:
+                    log.error("Missing codec capsfilter for %s", encoding)
+                    return
+                codec_name = "video/x-h264" if encoding == "H264" else "video/x-h265"
+                codec_caps.set_property("caps", Gst.Caps.from_string(
+                    "%s,stream-format=byte-stream,alignment=au" % codec_name
+                ))
+
+            sink.set_property("plane-id", PLANE_ID)
+            if sink.find_property("sync"):
+                sink.set_property("sync", False)
+            if sink.find_property("async"):
+                sink.set_property("async", False)
+            if sink.find_property("max-lateness"):
+                sink.set_property("max-lateness", 0)
+            if sink.find_property("processing-deadline"):
+                sink.set_property("processing-deadline", 0)
+            if sink.find_property("show-preroll-frame"):
+                sink.set_property("show-preroll-frame", False)
+            elems = [depay]
+            if parser:
+                elems.extend([parser, codec_caps])
+            elems.extend([dec, render_queue])
+            if conv:
+                elems.append(conv)
+            if force_software_scale:
+                scale.set_property("add-borders", False)
+                elems.append(scale)
+            if capsf:
+                caps = "video/x-raw,format=%s" % render_format
+                if force_software_scale:
+                    caps += ",width=%d,height=%d" % (DISPLAY_W, DISPLAY_H)
+                capsf.set_property("caps", Gst.Caps.from_string(caps))
+                elems.append(capsf)
+            elems.append(sink)
             for e in elems:
                 self.pipe.add(e)
 
-            depay.link(dec)
-            dec.link(conv)
-            conv.link(scale)
-            scale.link(capsf)
-            capsf.link(sink)
+            # Never drop compressed RTP frames before decoding: H.264/VP8
+            # reference frames would be invalidated.  The leaky queue after
+            # decoding drops only stale raw frames when the display is late.
+            if parser:
+                depay.link(parser)
+                parser.link(codec_caps)
+                codec_caps.link(dec)
+            else:
+                depay.link(dec)
+            dec.link(render_queue)
+            if force_software_scale:
+                (conv or render_queue).link(scale)
+                if capsf:
+                    scale.link(capsf)
+                    capsf.link(sink)
+                else:
+                    scale.link(sink)
+            else:
+                # Let the KMS plane scale the decoded frame. This avoids a
+                # full-resolution CPU videoscale pass on RK3588.
+                if capsf:
+                    conv.link(capsf)
+                    capsf.link(sink)
+                elif conv:
+                    conv.link(sink)
+                else:
+                    render_queue.link(sink)
+
+            decoder_pad = dec.get_static_pad("src")
+            sink_pad = sink.get_static_pad("sink")
+            if decoder_pad:
+                decoder_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_decoded_buffer)
+            if sink_pad:
+                sink_pad.add_probe(Gst.PadProbeType.BUFFER, self._on_presented_buffer)
 
             ret = pad.link(depay.get_static_pad("sink"))
             if ret != Gst.PadLinkReturn.OK:
@@ -144,9 +355,26 @@ class NativeReceiver:
 
             log.info("=== VIDEO PIPELINE LINKED: %s (plane-id=%d, %dx%d) ===",
                      encoding, PLANE_ID, DISPLAY_W, DISPLAY_H)
+            self._send_signaling({
+                "t": "receiver_status",
+                "s": self.sid,
+                "state": "playing",
+                "details": {
+                    "codec": encoding,
+                    "plane_id": PLANE_ID,
+                    "display_width": DISPLAY_W,
+                    "display_height": DISPLAY_H,
+                },
+            })
 
         except Exception as e:
             log.error("PAD_ADDED exception: %s", e)
+            self._send_signaling({
+                "t": "receiver_status",
+                "s": self.sid,
+                "state": "failed",
+                "details": {"reason": "video_pipeline_link_failed", "error": str(e)},
+            })
 
     def _handle_offer(self, sdp_str):
         log.info("Processing offer (len=%d)...", len(sdp_str))
@@ -174,8 +402,12 @@ class NativeReceiver:
                 self.webrtc.emit("set-local-description", answer, p)
                 p.interrupt()
                 sdp = answer.sdp
-                sdp_text = sdp.as_text()
+                sdp_text, bitrate_hints = self._with_lan_h264_bitrate_hints(sdp.as_text())
                 log.info("Answer created (len=%d), sending...", len(sdp_text))
+                if bitrate_hints:
+                    log.info("Answer H.264 LAN bitrate hints: %d/%d/%d kbps",
+                             LAN_H264_MIN_KBPS, LAN_H264_START_KBPS,
+                             LAN_H264_MAX_KBPS)
                 self._send_signaling({"t": "answer", "s": self.sid, "sdp": sdp_text})
                 # set-remote-description 已完成（promise.wait 后），flush 缓存的 ICE
                 self._remote_desc_set = True

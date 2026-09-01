@@ -313,6 +313,50 @@
       return `${wsProto}//${url.host}/ws`;
     }
 
+    const LOW_LATENCY_CAPTURE = {
+      cursor: 'always',
+      width: { ideal: 1280, max: 1920 },
+      height: { ideal: 720, max: 1080 },
+      frameRate: { ideal: 30, max: 30 },
+    };
+
+    function addLowLatencyTracks(peer, mediaStream) {
+      const videoTrack = mediaStream.getVideoTracks()[0];
+      if (videoTrack) {
+        const transceiver = peer.addTransceiver(videoTrack, { direction: 'sendonly' });
+        try {
+          const codecs = RTCRtpSender.getCapabilities('video')?.codecs || [];
+          codecs.sort((a, b) => (b.mimeType?.toLowerCase() === 'video/h264') - (a.mimeType?.toLowerCase() === 'video/h264'));
+          transceiver.setCodecPreferences(codecs);
+        } catch (e) { log('info', '编码器偏好设置跳过'); }
+        try {
+          const params = transceiver.sender.getParameters();
+          params.degradationPreference = 'maintain-framerate';
+          if (params.encodings?.length) {
+            params.encodings[0].maxFramerate = 30;
+            params.encodings[0].maxBitrate = 8000000;
+            params.encodings[0].networkPriority = 'high';
+          }
+          transceiver.sender.setParameters(params).catch(() => {});
+        } catch (e) { /* Optional browser API. */ }
+      }
+      mediaStream.getAudioTracks().forEach(track => peer.addTrack(track, mediaStream));
+    }
+
+    async function limitCapture(stream) {
+      const track = stream.getVideoTracks()[0];
+      if (!track || !track.applyConstraints) return;
+      try {
+        await track.applyConstraints({
+          width: { max: 1280 }, height: { max: 720 },
+          frameRate: { max: 30 }, resizeMode: 'crop-and-scale',
+        });
+        log('info', '低延迟采集约束已应用');
+      } catch (e) {
+        log('info', '浏览器未接受采集缩放约束，继续使用原始分辨率');
+      }
+    }
+
     // ========================================
     // 设备发现功能
     // ========================================
@@ -393,9 +437,10 @@
 
         const audio = document.getElementById('chkAudio').checked;
         localStream = await navigator.mediaDevices.getDisplayMedia({
-          video: { cursor: 'always' },
+          video: LOW_LATENCY_CAPTURE,
           audio: audio,
         });
+        await limitCapture(localStream);
 
         // 监听用户通过浏览器 UI 停止共享
         localStream.getVideoTracks()[0].onended = () => stopCast();
@@ -460,7 +505,7 @@
       };
 
       // 添加轨道
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      addLowLatencyTracks(pc, localStream);
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -556,7 +601,7 @@
           }
         };
 
-        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        addLowLatencyTracks(pc, localStream);
 
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);

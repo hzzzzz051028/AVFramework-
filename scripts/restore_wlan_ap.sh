@@ -7,6 +7,11 @@ set -euo pipefail
 systemctl start wpa_supplicant.service
 nmcli device set wlan0 managed yes || true
 
+# The standby unit is guarded while a native receiver owns KMS plane 71.
+# Clear the guard only after the receiver has stopped and WLAN restoration has
+# begun, then its normal service policy can render the standby page again.
+rm -f /run/screencast/display-exclusive-active
+
 for _ in $(seq 1 15); do
   if nmcli connection up RK-Screencast ifname wlan0 >/dev/null 2>&1; then
     systemctl start screencast-standby.service

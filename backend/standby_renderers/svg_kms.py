@@ -37,6 +37,66 @@ def _pairing_code(code_file, wait_seconds=0):
         time.sleep(.2)
 
 
+def _read_text(path):
+    try:
+        return Path(path).read_text(encoding='utf-8').strip()
+    except OSError:
+        return ''
+
+
+def _command_output(command):
+    try:
+        return subprocess.run(
+            command, text=True, capture_output=True, check=False, timeout=1
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ''
+
+
+def _interface_ipv4(interface):
+    output = _command_output(['ip', '-o', '-4', 'addr', 'show', 'dev', interface])
+    for token in output.split():
+        if '/' in token and token[0].isdigit():
+            return token.split('/', 1)[0]
+    return '--'
+
+
+def _system_summary():
+    values = {}
+    for line in _read_text('/proc/meminfo').splitlines():
+        parts = line.replace(':', '').split()
+        if len(parts) >= 2:
+            try:
+                values[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+    total = values.get('MemTotal', 0)
+    available = values.get('MemAvailable', 0)
+    memory_percent = round((1 - available / total) * 100) if total else 0
+
+    temperatures = []
+    for path in Path('/sys/class/thermal').glob('thermal_zone*/temp'):
+        try:
+            value = int(path.read_text().strip())
+        except (OSError, ValueError):
+            continue
+        temperatures.append(value / 1000 if value > 1000 else value)
+    temperature = f'{round(max(temperatures))}C' if temperatures else '--'
+
+    uptime_raw = _read_text('/proc/uptime').split()
+    try:
+        uptime_minutes = int(float(uptime_raw[0]) // 60)
+    except (IndexError, ValueError):
+        uptime_minutes = 0
+    return {
+        'ap_ip': _interface_ipv4('wlan0'),
+        'lan_ip': _interface_ipv4('enP4p65s0'),
+        'memory': f'{memory_percent}%',
+        'temperature': temperature,
+        'uptime': f'{uptime_minutes // 60}h {uptime_minutes % 60:02d}m',
+    }
+
+
 def render(args):
     if not shutil.which('qrencode'):
         raise SystemExit('qrencode is required for the SVG fallback')
@@ -46,6 +106,7 @@ def render(args):
     svg = tmp / 'standby.svg'
     wifi = f'WIFI:T:WPA;S:{args.ssid};P:{args.password};;'
     pairing_code = _pairing_code(args.pair_code_file, args.pair_code_wait)
+    system = _system_summary()
     subprocess.run(['qrencode', '-o', str(qr), '-s', '8', wifi], check=True)
     qr_data = base64.b64encode(qr.read_bytes()).decode('ascii')
     asset = Path(__file__).resolve().parents[2] / 'frontend' / 'assets' / 'standby' / 'ambient-cast.png'
@@ -83,8 +144,9 @@ def render(args):
 <rect x="{args.width * .405:.0f}" y="{args.height * .58:.0f}" width="{args.width * .145:.0f}" height="165" rx="18" fill="#1c1d35"/><text x="{args.width * .425:.0f}" y="{args.height * .62:.0f}" fill="#9f91ff" font-size="20">03</text><text x="{args.width * .425:.0f}" y="{args.height * .657:.0f}" fill="#ffffff" font-size="24" font-weight="bold">Enter code</text><text x="{args.width * .425:.0f}" y="{args.height * .691:.0f}" fill="#aeb5d8" font-size="18">Start sharing</text></g>
 <rect x="{args.width * .085:.0f}" y="{args.height * .75:.0f}" width="{args.width * .465:.0f}" height="{args.height * .125:.0f}" rx="20" fill="#111329" fill-opacity=".88" stroke="#343662"/>
 <text x="{args.width * .11:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18" letter-spacing="3">DEVICE PULSE</text><text x="{args.width * .11:.0f}" y="{args.height * .84:.0f}" fill="#ffffff" font-family="sans-serif" font-size="27" font-weight="bold">HDMI READY</text>
-<text x="{args.width * .30:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18">CODEC</text><text x="{args.width * .30:.0f}" y="{args.height * .84:.0f}" fill="#ffffff" font-family="sans-serif" font-size="27" font-weight="bold">MPP / KMS</text>
-<text x="{args.width * .46:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18">NETWORK</text><text x="{args.width * .46:.0f}" y="{args.height * .84:.0f}" fill="#57e3a8" font-family="sans-serif" font-size="27" font-weight="bold">AP READY</text>
+<text x="{args.width * .26:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18">MEMORY</text><text x="{args.width * .26:.0f}" y="{args.height * .84:.0f}" fill="#ffffff" font-family="sans-serif" font-size="27" font-weight="bold">{_esc(system['memory'])}</text>
+<text x="{args.width * .37:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18">TEMP</text><text x="{args.width * .37:.0f}" y="{args.height * .84:.0f}" fill="#ffffff" font-family="sans-serif" font-size="27" font-weight="bold">{_esc(system['temperature'])}</text>
+<text x="{args.width * .46:.0f}" y="{args.height * .795:.0f}" fill="#9da4c8" font-family="sans-serif" font-size="18">UPTIME</text><text x="{args.width * .46:.0f}" y="{args.height * .84:.0f}" fill="#57e3a8" font-family="sans-serif" font-size="27" font-weight="bold">{_esc(system['uptime'])}</text>
 <rect x="{args.width * .64:.0f}" y="{args.height * .17:.0f}" width="{args.width * .285:.0f}" height="{args.height * .71:.0f}" rx="28" fill="url(#card)" stroke="#3a3b68" stroke-width="2"/>
 <text x="{args.width * .675:.0f}" y="{args.height * .235:.0f}" fill="#a99aff" font-family="sans-serif" font-size="20" letter-spacing="4">QUICK CONNECT</text><circle cx="{args.width * .89:.0f}" cy="{args.height * .227:.0f}" r="6" fill="#57e3a8"/>
 <rect x="{args.width * .714:.0f}" y="{args.height * .275:.0f}" width="{args.width * .136:.0f}" height="{args.width * .136:.0f}" rx="18" fill="#ffffff"/>
@@ -93,7 +155,9 @@ def render(args):
 <text x="{args.width * .685:.0f}" y="{args.height * .59:.0f}" fill="#aab0d4" font-family="sans-serif" font-size="18">NETWORK NAME</text><text x="{args.width * .685:.0f}" y="{args.height * .625:.0f}" fill="#ffffff" font-family="sans-serif" font-size="31" font-weight="bold">{_esc(args.ssid)}</text>
 <text x="{args.width * .685:.0f}" y="{args.height * .67:.0f}" fill="#aab0d4" font-family="sans-serif" font-size="18">PASSWORD</text><text x="{args.width * .685:.0f}" y="{args.height * .705:.0f}" fill="#ffffff" font-family="sans-serif" font-size="31" font-weight="bold">{_esc(args.password)}</text>
 <text x="{args.width * .685:.0f}" y="{args.height * .75:.0f}" fill="#aab0d4" font-family="sans-serif" font-size="18">CASTING CODE</text><rect x="{args.width * .678:.0f}" y="{args.height * .767:.0f}" width="{args.width * .21:.0f}" height="68" rx="12" fill="#34345f"/><text x="{args.width * .783:.0f}" y="{args.height * .815:.0f}" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="37" font-weight="bold" letter-spacing="7">{pairing_code}</text>
-<text x="{args.width / 2:.0f}" y="{args.height * .955:.0f}" text-anchor="middle" fill="#9da4c8" font-family="sans-serif" font-size="19">RK3588  ·  LOW LATENCY WIRELESS DISPLAY  ·  {_esc(args.address)}</text>
+<text x="{args.width * .685:.0f}" y="{args.height * .855:.0f}" fill="#aab0d4" font-family="sans-serif" font-size="16">AP / LAN</text><text x="{args.width * .745:.0f}" y="{args.height * .855:.0f}" fill="#dfe4ff" font-family="monospace" font-size="16">{_esc(system['ap_ip'])} / {_esc(system['lan_ip'])}</text>
+<text x="{args.width / 2:.0f}" y="{args.height * .935:.0f}" text-anchor="middle" fill="#9da4c8" font-family="sans-serif" font-size="18">WEBRTC  ·  AIRPLAY  ·  MIRACAST  ·  RK3588 HARDWARE DECODE</text>
+<text x="{args.width / 2:.0f}" y="{args.height * .965:.0f}" text-anchor="middle" fill="#747b9f" font-family="monospace" font-size="16">{_esc(args.address)}</text>
 </svg>''', encoding='utf-8')
     cmd = ['gst-launch-1.0', '-q', 'filesrc', f'location={svg}', '!', 'rsvgdec', '!', 'imagefreeze', '!', 'videoconvert', '!', 'videoscale', '!',
            f'video/x-raw,width={args.width},height={args.height}', '!', 'kmssink', f'plane-id={args.plane_id}', 'sync=false']

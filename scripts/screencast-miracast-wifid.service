@@ -10,6 +10,8 @@ Type=simple
 # NetworkManager globally: it is also responsible for the Ethernet management
 # channel used to recover a failed P2P negotiation.
 ExecStartPre=/usr/bin/systemctl stop screencast-airplay-poc.service
+ExecStartPre=/usr/bin/install -d -m 0755 /run/screencast
+ExecStartPre=/usr/bin/touch /run/screencast/display-exclusive-active
 ExecStartPre=/usr/bin/systemctl stop screencast-standby.service
 ExecStartPre=/bin/sh -c '/usr/bin/nmcli device disconnect wlan0 || true'
 ExecStartPre=/usr/bin/nmcli device set wlan0 managed no

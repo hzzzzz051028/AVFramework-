@@ -706,3 +706,10 @@ decoder.mode = software | auto | hardware
 - 现象：AirPlay 接收器不可用时，根因是 `screencast-airplay-poc.service` 处于 `inactive (dead)`；并非 UxPlay 媒体管线报错。板端还提示其 systemd unit 文件已变更但未 reload。
 - 处理：已执行 `sudo systemctl daemon-reload` 和 `sudo systemctl start screencast-airplay-poc.service`。服务目前 active，UxPlay 1.74 已初始化 server socket，并广播 AirPlay Features `0x527FFEE6`；Avahi 同时 active。当前接收器展示名称为 `RK-Cast-Native`。
 - 注意：该 POC 单元仍是 disabled，板子重启后不会自行启动；这是为了避免它和 WebRTC 竞争 KMS plane 71。后续应由 display arbiter wrapper 负责显式模式切换，再决定是否改为产品级开机策略。
+
+### 2026-09-01 — 修复 AirPlay 与待机页 KMS 竞争，扩展待机信息
+
+- 根因：AirPlay 与 `screencast-standby.service` 同时 active，两个 GStreamer 进程都使用 `kmssink plane-id=71`。单靠 AirPlay 的 `ExecStartPre=systemctl stop` 不足以阻止其他路径再次启动 `Restart=always` 的待机服务，导致叠画、闪烁和 AirPlay 不稳定。
+- 修复：待机 unit 增加 `ConditionPathExists=!/run/screencast/display-exclusive-active`。AirPlay/Miracast 启动前创建该 volatile marker，停止后删除再恢复待机。这样即使主服务、部署脚本或 Restart policy 请求启动待机，native casting 期间也会被 systemd 跳过，而不是竞争 KMS plane。
+- 板端验证：已部署 unit 与 fallback renderer；当前 `screencast-airplay-poc.service=active`、`screencast-standby.service=inactive`、marker 存在、无 standby renderer 子进程。手动 `systemctl start screencast-standby.service` 后仍保持 inactive，AirPlay 继续 active，互斥生效。未为验证而中断当前 AirPlay 会话；AirPlay 停止后的待机恢复在下一次正常结束时验证。
+- 待机信息：无 kiosk 的 SVG/KMS 页面增加真实 AP IP、有线 LAN IP、内存使用、最高温度、运行时长，以及 WebRTC/AirPlay/Miracast 和硬件解码能力提示；保留二维码、SSID、密码、投屏入口和投屏码。

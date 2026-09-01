@@ -9,10 +9,13 @@ Type=simple
 # owns the HDMI overlay plane; stopping it restores the regular standby UI.
 Environment=GST_PLUGIN_PATH=/opt/screencast/vendor/gstreamer-rockchip/lib/gstreamer-1.0
 Environment=LD_LIBRARY_PATH=/opt/screencast/vendor/mpp/lib
+ExecStartPre=/usr/bin/install -d -m 0755 /run/screencast
+ExecStartPre=/usr/bin/touch /run/screencast/display-exclusive-active
 ExecStartPre=/usr/bin/systemctl stop screencast-standby.service
 # Native NV12 is supported by the RK MPP decoder and KMS plane.  Keep the
 # compressed stream intact and skip UxPlay's default RGB/sRGB round-trip.
 ExecStart=/opt/screencast/vendor/uxplay/bin/uxplay -d 1 -FPSdata -n RK-Cast-Native -nh -s 2560x1440@60 -fps 60 -vsync no -srgb no -vc identity -as 0 -vd mppvideodec -vs "kmssink plane-id=71 sync=false"
+ExecStopPost=/usr/bin/rm -f /run/screencast/display-exclusive-active
 ExecStopPost=/usr/bin/systemctl start screencast-standby.service
 Restart=on-failure
 RestartSec=3

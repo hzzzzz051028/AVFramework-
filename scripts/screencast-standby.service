@@ -2,6 +2,10 @@
 Description=Wireless Display HDMI Standby Screen
 After=local-fs.target systemd-udev-settle.service screencast-display-console.service screencast.service
 Wants=screencast-display-console.service screencast.service
+# AirPlay/Miracast creates this volatile marker before it owns KMS plane 71.
+# It keeps Restart=always reliable without reviving a second renderer below an
+# active cast.
+ConditionPathExists=!/run/screencast/display-exclusive-active
 
 [Service]
 Type=simple
